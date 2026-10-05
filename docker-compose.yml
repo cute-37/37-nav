@@ -1,0 +1,21 @@
+# 用法：docker compose up -d
+# 项目名写死：compose 默认用所在目录名，目录名是中文时会得到空名字而报错
+name: nav
+services:
+  nav:
+    build: .
+    image: 37-nav:1.0.0
+    container_name: nav
+    restart: unless-stopped
+    ports:
+      # 左边是对外的端口，想换端口改左边这个数字即可
+      - "3080:3080"
+    volumes:
+      # 数据库和密钥都在这个卷里，备份见 DEPLOY.md
+      - nav-data:/data
+    # environment:
+    #   # 前面有 Nginx / Caddy 等反向代理时取消注释
+    #   TRUST_PROXY: "1"
+
+volumes:
+  nav-data:

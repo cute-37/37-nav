@@ -1,0 +1,38 @@
+{
+  "name": "37-nav",
+  "version": "1.0.0",
+  "private": true,
+  "description": "自托管网址导航：公开/私密模式、账号信息保管、IP 白名单、书签导入",
+  "license": "MIT",
+  "homepage": "https://github.com/cute-37/37-nav",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cute-37/37-nav.git"
+  },
+  "type": "module",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node --watch server/index.js",
+    "reset-password": "node scripts/reset-password.js"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "dependencies": {
+    "bcryptjs": "^3.0.3",
+    "cn-fontsource-975-maru-sc-bold": "^1.0.1",
+    "cn-fontsource-xiaolai-sc-regular": "^1.0.2",
+    "cookie-session": "^2.1.1",
+    "cropperjs": "^1.6.2",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.7.0",
+    "fuse.js": "^7.5.0",
+    "heic-to": "^1.6.5",
+    "helmet": "^8.3.0",
+    "ipaddr.js": "^2.5.0",
+    "lucide-static": "^1.52.0",
+    "pinyin-pro": "^3.29.4",
+    "sortablejs": "^1.15.7",
+    "vue": "^3.5.43"
+  }
+}

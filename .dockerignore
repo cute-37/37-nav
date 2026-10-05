@@ -1,0 +1,9 @@
+node_modules
+data
+.git
+.claude
+deploy
+*.md
+docs
+LICENSE
+release

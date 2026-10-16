@@ -49,20 +49,26 @@ function color(text) {
 // 浏览器导出的 Netscape 书签格式：<DT><H3>文件夹</H3><DL> … <DT><A HREF>
 function parseBookmarks(html) {
   const doc = new DOMParser().parseFromString(html, 'text/html');
-  const folderOf = (a) => {
+  // 一个书签所在的文件夹路径，如「开发/前端」。最多保留三层，更深的并进第三层
+  const pathOf = (a) => {
+    const names = [];
+    let inToolbar = false;
     for (let dl = a.closest('dl'); dl; dl = dl.parentElement?.closest('dl')) {
       let h = dl.previousElementSibling;
       while (h && h.tagName !== 'H3') h = h.previousElementSibling;
       h ||= dl.parentElement?.querySelector(':scope > h3');
       // Firefox 拖出文件夹时用的是 <DL><DT>文件夹名</DT><DD><A>…
       h ||= [...dl.children].find((el) => el.tagName === 'DT' && !el.querySelector('a'));
-      if (h) return h.textContent.trim();
+      if (!h) continue;
+      // 「书签栏」这一层人人都有，留着只会白占一层，去掉
+      if (h.hasAttribute('personal_toolbar_folder')) inToolbar = true;
+      else names.unshift(h.textContent.trim().replaceAll('/', '／'));
     }
-    return '';
+    return names.filter(Boolean).slice(0, 3).join('/') || (inToolbar ? '书签栏' : '');
   };
   return [...doc.querySelectorAll('a[href]')]
     .filter((a) => /^https?:\/\//i.test(a.getAttribute('href')))
-    .map((a) => ({ url: a.getAttribute('href'), title: a.textContent.trim(), category: folderOf(a) }));
+    .map((a) => ({ url: a.getAttribute('href'), title: a.textContent.trim(), category: pathOf(a) }));
 }
 
 // 从浏览器拖进来的内容：书签、地址栏网址、网页上的链接，Firefox 还能拖整个书签文件夹
@@ -185,6 +191,24 @@ const vHold = {
   },
 };
 
+// 带「小眼睛」的密码输入框：点一下显示明文，方便核对有没有输错
+const PwInput = {
+  props: { modelValue: String, placeholder: String, autocomplete: String, autofocus: Boolean },
+  emits: ['update:modelValue'],
+  data: () => ({ show: false }),
+  mounted() {
+    if (this.autofocus) this.$refs.input.focus();
+  },
+  template: `
+    <span class="pw">
+      <input ref="input" class="input" :type="show ? 'text' : 'password'" :value="modelValue" :placeholder="placeholder"
+             :autocomplete="autocomplete" @input="$emit('update:modelValue', $event.target.value)">
+      <button type="button" class="ib" tabindex="-1" :title="show ? '隐藏密码' : '显示密码'" @click="show = !show">
+        <i class="ic" :class="show ? 'ic-eye' : 'ic-eye-off'"></i>
+      </button>
+    </span>`,
+};
+
 const Modal = {
   props: { title: String, width: String },
   emits: ['close'],
@@ -206,6 +230,7 @@ const Modal = {
     </div>`,
 };
 
+const secretList = (value) => value ? (Array.isArray(value) ? value : [value]) : [];
 const emptySecret = () => ({ account: '', password: '', note: '', extra: [] });
 
 createApp({
@@ -222,6 +247,12 @@ createApp({
         sidebar: window.innerWidth > 760,
         mode: null,
         newPrivate: true,
+        // 工作模式：隐藏 NSFW 网址（默认开着，任何人打开都是安全的）
+        // NSFW 显示方式：work 隐藏 / blur 模糊 / full 完全显示
+        nsfwMode: 'work',
+        // 收起状态：sideFolded 是侧栏里收起了子分类的分类，folded 是主页面里收起的小节
+        sideFolded: {},
+        folded: {},
       })
     );
     // 窄屏上侧栏是盖在内容上的抽屉，每次打开页面都先收起
@@ -287,7 +318,7 @@ createApp({
           const state = await request('GET', '/state').then((r) => r.json()).catch(() => null);
           if (state && !state.authorized) {
             st.authorized = false;
-            say('私密模式已失效，请重新进入');
+            say('管理员模式已失效，请重新进入');
             loadData().catch(() => {});
           }
         }
@@ -296,7 +327,7 @@ createApp({
     }
 
     async function loadData() {
-      const data = await api('GET', '/data?mode=' + (priv.value ? 'private' : 'public'));
+      const data = await api('GET', '/data?mode=' + (priv.value ? 'private' : 'public') + '&work=' + (prefs.nsfwMode === 'work' ? 1 : 0));
       st.categories = data.categories;
       // 服务端还是旧版本（没重启）时返回的数据没有 categories，补上以免整页渲染失败
       for (const l of data.links) {
@@ -304,7 +335,7 @@ createApp({
         l.pos ??= {};
       }
       st.links = data.links;
-      // 已不存在的网址从多选里剔除；离开私密模式时直接退出多选
+      // 已不存在的网址从多选里剔除；离开管理员模式时直接退出多选
       const alive = new Set(data.links.map((l) => l.id));
       for (const id of [...sel]) if (!alive.has(id)) sel.delete(id);
       if (!priv.value) exitSel();
@@ -339,16 +370,69 @@ createApp({
     const menuOpen = ref(false);
     const searchEl = ref(null);
 
+    // ---------- 分类树（最多三层） ----------
+    const MAX_DEPTH = 3;
     const catById = computed(() => new Map(st.categories.map((c) => [c.id, c])));
+    // 每个分类下面的子分类，按顺序排好；上级不在列表里的（理论上不会有）当作顶层
+    const catKids = computed(() => {
+      const map = new Map();
+      for (const c of st.categories) {
+        const key = catById.value.has(c.parent_id) ? c.parent_id : null;
+        if (!map.has(key)) map.set(key, []);
+        map.get(key).push(c);
+      }
+      for (const list of map.values()) list.sort((a, b) => a.sort - b.sort || a.id - b.id);
+      return map;
+    });
+    const kidsOf = (id) => catKids.value.get(id) || [];
+    // 从顶层到自己的一串
+    const catChain = (id) => {
+      const chain = [];
+      for (let c = catById.value.get(id); c && chain.length < 10; c = catById.value.get(c.parent_id)) chain.unshift(c);
+      return chain;
+    };
     const catName = (id) => catById.value.get(id)?.name || '';
-    // 所属分类全是私密分类的网址，公开模式下同样看不到
-    const isPrivate = (l) => l.private || (l.categories.length > 0 && l.categories.every((id) => catById.value.get(id)?.private));
+    const catPath = (id) => catChain(id).map((c) => c.name).join('/'); // 给接口用
+    const catLabel = (id) => catChain(id).map((c) => c.name).join(' / '); // 给人看
+    const catDepth = (id) => catChain(id).length;
+    const catHeight = (id) => 1 + Math.max(0, ...kidsOf(id).map((c) => catHeight(c.id)));
+    // 自己或任何一级上级私密，就算私密
+    const catPrivate = (id) => catChain(id).some((c) => c.private);
+    // 分类或它任何一级上级标了 NSFW
+    const catNsfw = (id) => catChain(id).some((c) => c.nsfw);
+    // 卡片的悬停提示：名称、网址、描述，各占一行（重复的不再显示）
+    const cardTip = (l) => [...new Set([l.title, l.url, l.desc].map((t) => t?.trim()).filter(Boolean))].join('\n');
+    const isNsfw = (l) => !!l && (l.nsfw || l.categories.some(catNsfw));
+    const subtreeIds = (id) => [id, ...kidsOf(id).flatMap((c) => subtreeIds(c.id))];
+    // 整棵树按显示顺序排成一列，带层级
+    const catOrder = computed(() => {
+      const out = [];
+      const walk = (parentId, depth) =>
+        kidsOf(parentId).forEach((cat) => {
+          out.push({ cat, depth });
+          walk(cat.id, depth + 1);
+        });
+      walk(null, 0);
+      return out;
+    });
+    const hasNested = computed(() => st.categories.some((c) => catById.value.has(c.parent_id)));
+    // 侧栏里实际显示的行：上级被收起的不显示
+    const sideCats = computed(() => catOrder.value.filter(({ cat }) => !catChain(cat.id).slice(0, -1).some((c) => prefs.sideFolded[c.id])));
+    const toggleSideFold = (id) => (prefs.sideFolded[id] ? delete prefs.sideFolded[id] : (prefs.sideFolded[id] = true));
+    const toggleFold = (id) => (prefs.folded[id] ? delete prefs.folded[id] : (prefs.folded[id] = true));
+    // 用缩进表示层级的下拉 / 菜单文字
+    const indent = (depth, name) => '　'.repeat(depth) + name;
 
+    // 所属分类全是私密分类的网址，公开模式下同样看不到
+    const isPrivate = (l) => l.private || (l.categories.length > 0 && l.categories.every(catPrivate));
+
+    // 每个分类的网址数：包含它下面各级子分类里的，同一个网址只算一次
     const catCount = computed(() => {
       const count = { none: 0 };
       for (const l of st.links) {
         if (!l.categories.length) count.none++;
-        for (const id of l.categories) count[id] = (count[id] || 0) + 1;
+        const ids = new Set(l.categories.flatMap((id) => catChain(id).map((c) => c.id)));
+        for (const id of ids) count[id] = (count[id] || 0) + 1;
       }
       return count;
     });
@@ -370,7 +454,7 @@ createApp({
           host: host(l),
           desc: l.desc,
           tags: l.tags,
-          cat: l.categories.map(catName),
+          cat: l.categories.map(catLabel),
           py: cjk ? pinyin(l.title, { toneType: 'none', type: 'array', nonZh: 'consecutive' }).join('') : '',
           initials: cjk ? pinyin(l.title, { pattern: 'first', toneType: 'none', type: 'array', nonZh: 'consecutive' }).join('') : '',
         };
@@ -391,7 +475,7 @@ createApp({
     });
 
     // 每个分类有各自的顺序（pos），未分类的用 sort
-    const posIn = (catId) => (a, b) => (catId == null ? a.sort - b.sort : a.pos[catId] - b.pos[catId]) || a.id - b.id;
+    const posIn = (catId) => (a, b) => (catId == null ? a.sort - b.sort : (a.pos[catId] ?? 1e9) - (b.pos[catId] ?? 1e9)) || a.id - b.id;
     const sorters = {
       custom: (a, b) => posIn(nav.type === 'cat' ? nav.id : null)(a, b),
       clicks: (a, b) => b.clicks - a.clicks,
@@ -406,8 +490,10 @@ createApp({
       } else if (nav.type === 'recent') {
         list = st.links.filter((l) => l.last_visit).sort((a, b) => b.last_visit - a.last_visit).slice(0, 30);
       } else {
+        // 看某个分类时，它下面各级子分类里的网址也算在内
+        const inside = nav.type === 'cat' && nav.id !== null ? new Set(subtreeIds(nav.id)) : null;
         list = st.links.filter(
-          (l) => nav.type === 'all' || (nav.type === 'pinned' ? l.pinned : nav.id === null ? !l.categories.length : l.categories.includes(nav.id))
+          (l) => nav.type === 'all' || (nav.type === 'pinned' ? l.pinned : inside ? l.categories.some((id) => inside.has(id)) : !l.categories.length)
         );
         list.sort(sorters[sort.value]);
       }
@@ -418,23 +504,51 @@ createApp({
     });
 
     const groups = computed(() => {
-      const grouped = !query.value && sort.value === 'custom' && ['all', 'pinned'].includes(nav.type);
-      // 平铺视图里只有「正在看某个分类」时才知道卡片来自哪个分类，其余情况 catId 留空
-      if (!grouped) return [{ key: 'flat', name: '', catId: nav.type === 'cat' ? nav.id : undefined, links: shown.value }];
-      const result = st.categories.map((c) => ({
-        key: c.id,
-        name: c.name,
-        private: c.private,
-        catId: c.id,
-        links: shown.value.filter((l) => l.categories.includes(c.id)).sort(posIn(c.id)),
-      }));
-      result.push({ key: 'none', name: '未分类', catId: null, links: shown.value.filter((l) => !l.categories.length).sort(posIn(null)) });
-      return result.filter((g) => g.links.length);
+      const grouped = !query.value && sort.value === 'custom' && (['all', 'pinned'].includes(nav.type) || (nav.type === 'cat' && nav.id !== null));
+      // 平铺视图里只有「正在看未分类」时才知道卡片来自哪，其余情况 catId 留空
+      if (!grouped) return [{ key: 'flat', name: '', depth: 0, catId: nav.type === 'cat' ? nav.id : undefined, links: shown.value, all: shown.value }];
+      const result = [];
+      const rootId = nav.type === 'cat' ? nav.id : null;
+      // 正在看某个分类时，它自己的内容不缩进、不带标题，子分类从第一层开始
+      const base = rootId === null ? 0 : catDepth(rootId);
+      const walk = (cat, hidden) => {
+        const ids = new Set(subtreeIds(cat.id));
+        const all = shown.value.filter((l) => l.categories.some((id) => ids.has(id)));
+        if (!all.length) return;
+        const isRoot = cat.id === rootId;
+        const folded = !isRoot && !!prefs.folded[cat.id];
+        if (!hidden) {
+          result.push({
+            key: cat.id,
+            name: isRoot ? '' : cat.name,
+            private: catPrivate(cat.id),
+            catId: cat.id,
+            depth: Math.max(0, catDepth(cat.id) - 1 - base + (rootId === null ? 0 : 1)),
+            // 收起时不渲染卡片；all 是这一节连同子分类的全部网址，用于计数和全选
+            links: folded ? [] : shown.value.filter((l) => l.categories.includes(cat.id)).sort(posIn(cat.id)),
+            all,
+            folded,
+            foldable: !isRoot,
+          });
+        }
+        kidsOf(cat.id).forEach((kid) => walk(kid, hidden || folded));
+      };
+      if (rootId === null) kidsOf(null).forEach((cat) => walk(cat, false));
+      else walk(catById.value.get(rootId), false);
+      if (rootId === null) {
+        const loose = shown.value.filter((l) => !l.categories.length).sort(posIn(null));
+        if (loose.length) result.push({ key: 'none', name: '未分类', depth: 0, catId: null, links: prefs.folded.none ? [] : loose, all: loose, folded: !!prefs.folded.none, foldable: true });
+      }
+      return result;
     });
+    function foldAll(fold) {
+      for (const key of Object.keys(prefs.folded)) delete prefs.folded[key];
+      if (fold) for (const c of st.categories) prefs.folded[c.id] = true;
+    }
 
     const heading = computed(() => {
       if (query.value) return `搜索「${query.value}」`;
-      if (nav.type === 'cat') return nav.id === null ? '未分类' : catName(nav.id);
+      if (nav.type === 'cat') return nav.id === null ? '未分类' : catLabel(nav.id);
       return { all: '全部网址', pinned: '常用', recent: '最近访问' }[nav.type];
     });
 
@@ -465,15 +579,103 @@ createApp({
       window.open(url, prefs.newTab ? '_blank' : '_self', 'noopener,noreferrer');
     }
 
+    // 图标分两级：先向本站要（服务器抓好缓存的），要不到再让浏览器直接去那个网站取，都不行就显示首字
     const iconOk = reactive(new Set());
-    const iconBad = reactive(new Set());
-    const iconUrl = (l) => new URL('/favicon.ico', l.url).href;
+    const iconStage = reactive(new Map());
+    const iconBust = reactive(new Map());
+    const iconSrc = (l) =>
+      !l ? '' : iconStage.get(l.id) === 1 ? new URL('/favicon.ico', l.url).href : `/icon/${l.id}?v=${l.icon_v || ''}${iconBust.get(l.id) || ''}`;
+    const iconShow = (l) => !!l && prefs.icons && (iconStage.get(l.id) || 0) < 2;
+    const iconLoaded = (l) => l && iconOk.add(l.id);
+    function iconFailed(l) {
+      if (!l) return;
+      iconOk.delete(l.id);
+      iconStage.set(l.id, (iconStage.get(l.id) || 0) + 1);
+    }
+    function iconReload(l) {
+      iconOk.delete(l.id);
+      iconStage.delete(l.id);
+      iconBust.set(l.id, Date.now());
+    }
+    function uploadIcon(link) {
+      const input = Object.assign(document.createElement('input'), { type: 'file', accept: 'image/*,.heic,.heif' });
+      input.onchange = () => pickLogo(input.files[0], link);
+      input.click();
+    }
+    async function setIcon(link, icon) {
+      try {
+        await api('PUT', `/links/${link.id}/icon`, { icon });
+        await loadData();
+        iconReload(link);
+        say(icon ? '图标已更换' : '已恢复自动图标');
+      } catch (e) {
+        say(e.message);
+      }
+    }
+    // 从网站上找到的全部图标里挑一个。挑中的图转成 PNG 保存为这个网址的图标（ICO、SVG 等格式统一处理）
+    const iconPick = reactive({ id: null, loading: false, busy: false, icons: [], error: '', chosen: null });
+    async function loadIconChoices(link, refresh = false) {
+      if (!link) return;
+      if (iconPick.id !== link.id) Object.assign(iconPick, { icons: [], chosen: null });
+      Object.assign(iconPick, { id: link.id, loading: true, error: '' });
+      try {
+        const icons = (await api('GET', `/links/${link.id}/icon/candidates${refresh ? '?refresh=1' : ''}`)).icons;
+        if (iconPick.id === link.id) iconPick.icons = icons.map((ic) => ({ ...ic, w: 0, h: 0 }));
+      } catch (e) {
+        iconPick.error = e.message;
+      } finally {
+        iconPick.loading = false;
+      }
+    }
+    async function chooseIcon(link, ic, index) {
+      iconPick.busy = true;
+      try {
+        const img = new Image();
+        img.src = ic.src;
+        await img.decode();
+        const side = Math.min(256, Math.max(img.naturalWidth, img.naturalHeight) || 128);
+        const canvas = Object.assign(document.createElement('canvas'), { width: side, height: side });
+        const scale = Math.min(side / (img.naturalWidth || side), side / (img.naturalHeight || side));
+        const w = (img.naturalWidth || side) * scale;
+        const h = (img.naturalHeight || side) * scale;
+        canvas.getContext('2d').drawImage(img, (side - w) / 2, (side - h) / 2, w, h);
+        await setIcon(link, canvas.toDataURL('image/png'));
+        iconPick.chosen = index;
+      } catch {
+        say('这张图无法使用，换一张试试');
+      } finally {
+        iconPick.busy = false;
+      }
+    }
+    async function refetchIcon(link) {
+      try {
+        await api('POST', `/links/${link.id}/icon/refresh`);
+        // 同一个网站的其他网址用的是同一份缓存，一起刷新
+        const origin = new URL(link.url).origin;
+        for (const l of st.links) if (new URL(l.url).origin === origin) iconReload(l);
+        say('正在重新获取图标…');
+      } catch (e) {
+        say(e.message);
+      }
+    }
 
     // ---------- 公开 / 私密 ----------
     const login = reactive({ open: false, password: '', error: '', busy: false, then: null });
 
     function askLogin(then = null) {
       Object.assign(login, { open: true, password: '', error: '', then });
+    }
+    // 三档轮换：工作（隐藏）→ 模糊 → 完全
+    const NSFW_MODES = {
+      work: { label: '工作', next: 'blur', tip: '工作模式：NSFW 网址已隐藏' },
+      blur: { label: '模糊', next: 'full', tip: '模糊模式：NSFW 网址的图标和文字打码，悬停看清' },
+      full: { label: '完全', next: 'work', tip: '完全模式：显示全部网址' },
+    };
+    if (!NSFW_MODES[prefs.nsfwMode]) prefs.nsfwMode = 'work';
+    async function toggleWork() {
+      prefs.nsfwMode = NSFW_MODES[prefs.nsfwMode].next;
+      await loadData();
+      say('已切到' + NSFW_MODES[prefs.nsfwMode].tip);
     }
     async function toggleMode() {
       if (priv.value) {
@@ -524,19 +726,24 @@ createApp({
     const closePage = () => (location.hash = '');
     const fmtTime = (t) => (t ? new Date(t).toLocaleString('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }) : '—');
 
-    // 账号信息只在私密模式下按需取，离开私密模式立刻清掉
+    // 账号信息只在管理员模式下按需取，离开管理员模式立刻清掉
     async function loadSecret() {
       const link = pageLink.value;
+      const requestId = (page.requestId || 0) + 1;
+      page.requestId = requestId;
+      page.loading = false;
+      page.show = false;
       page.secret = null;
       page.error = '';
       if (!link || !priv.value || !link.has_secret) return;
       page.loading = true;
       try {
-        page.secret = (await api('GET', `/links/${link.id}/secret`)).secret;
+        const result = await api('GET', `/links/${link.id}/secret`);
+        if (page.requestId === requestId && priv.value && page.id === link.id) page.secret = result.secret;
       } catch (e) {
-        page.error = e.message;
+        if (page.requestId === requestId) page.error = e.message;
       } finally {
-        page.loading = false;
+        if (page.requestId === requestId) page.loading = false;
       }
     }
     function readHash() {
@@ -548,7 +755,7 @@ createApp({
     // 数据重新加载后（保存、切换公开/私密等）刷新一次账号信息
     watch(() => st.links, () => page.id !== null && loadSecret());
 
-    function startEdit() {
+    function startEdit(section) {
       const d = pageLink.value.detail || {};
       page.draft = {
         summary: d.summary || '',
@@ -556,13 +763,31 @@ createApp({
         notes: d.notes || '',
         links: (d.links || []).map((l) => ({ ...l })),
       };
-      page.editing = true;
+      page.editing = section;
+    }
+    // 焦点离开正在编辑的栏目（点了外面）就保存；在栏目里面点按钮不算离开
+    // 不能只看 relatedTarget：点铅笔进入编辑时，铅笔按钮被移除也会触发一次 focusout。
+    // 等焦点落定后再看它还在不在这一栏里
+    function secBlur(e, key) {
+      const sec = e.currentTarget;
+      setTimeout(() => {
+        if (page.editing === key && !sec.contains(document.activeElement)) saveDetail();
+      });
+    }
+    function secCancel(key) {
+      if (page.editing === key) page.editing = false;
     }
     async function saveDetail() {
+      if (page.busy || !page.editing) return;
+      // 没改动就直接退出编辑，不发请求
+      const d = pageLink.value?.detail || {};
+      const before = { summary: d.summary || '', features: (d.features || []).join('\n'), notes: d.notes || '', links: (d.links || []).map((l) => ({ ...l })) };
+      if (JSON.stringify(before[page.editing]) === JSON.stringify(page.draft[page.editing])) return (page.editing = false);
       page.busy = true;
       try {
         const { summary, features, notes, links } = page.draft;
         await api('PUT', `/links/${page.id}/detail`, {
+          section: page.editing,
           detail: { summary, features: features.split('\n'), notes, links: links.filter((l) => l.url.trim()) },
         });
         page.editing = false;
@@ -574,6 +799,34 @@ createApp({
         page.busy = false;
       }
     }
+    const accountEdit = reactive({ open: false, id: null, index: -1, entries: [], draft: emptySecret(), busy: false, error: '', showPw: false });
+    watch(priv, (value) => { if (!value) { Object.assign(accountEdit, { open: false, entries: [], draft: emptySecret(), showPw: false }); page.secret = null; page.editing = false; } });
+    const pageAccounts = computed(() => secretList(page.secret));
+    const detailSections = [
+      { key: 'summary', title: '简介', hint: '这个网站是什么、用来做什么' },
+      { key: 'features', title: '功能亮点', hint: '每行一条' },
+      { key: 'notes', title: '使用笔记', hint: '注意事项、技巧、收费情况等' },
+      { key: 'links', title: '相关链接' },
+    ];
+    async function editAccount(index = -1) {
+      if (page.loading || page.error) return;
+      Object.assign(accountEdit, { open: true, id: page.id, index, showPw: false, entries: structuredClone(secretList(JSON.parse(JSON.stringify(page.secret)))), draft: { ...emptySecret(), ...(index >= 0 ? JSON.parse(JSON.stringify(pageAccounts.value[index])) : {}) }, busy: false, error: '' });
+    }
+    async function saveAccount(remove = false) {
+      accountEdit.busy = true;
+      accountEdit.error = '';
+      try {
+        const entries = [...accountEdit.entries];
+        if (remove) entries.splice(accountEdit.index, 1);
+        else if (accountEdit.index < 0) entries.push(accountEdit.draft);
+        else entries[accountEdit.index] = accountEdit.draft;
+        await api('PUT', `/links/${accountEdit.id}/secret`, { secret: entries });
+        accountEdit.open = false;
+        await loadData();
+        say('账号信息已保存');
+      } catch (e) { accountEdit.error = e.message; }
+      finally { accountEdit.busy = false; }
+    }
     async function copy(text) {
       await copyText(text);
       say('已复制');
@@ -581,12 +834,12 @@ createApp({
 
     // ---------- 网址增删改 ----------
     const form = reactive({ open: false, secret: emptySecret() });
-    const secretFilled = computed(() => {
-      const s = form.secret;
-      return !!(s.account || s.password || s.note || s.extra.length);
-    });
+    // 正在编辑的那个网址（新建时为空），图标那一行要用
+    const formLink = computed(() => (form.id ? st.links.find((l) => l.id === form.id) : null));
+    // 打开编辑弹窗时自动列出候选图标
+    watch(() => form.open && form.id, (id) => id && loadIconChoices(st.links.find((l) => l.id === id)));
     const formCatPrivate = computed(
-      () => form.categories?.length > 0 && form.categories.every((name) => st.categories.find((c) => c.name === name)?.private)
+      () => form.categories?.length > 0 && form.categories.every((path) => catOrder.value.some(({ cat }) => catPath(cat.id) === path && catPrivate(cat.id)))
     );
     function addFormCat() {
       const name = form.catInput?.trim();
@@ -601,12 +854,13 @@ createApp({
         id: link?.id ?? null,
         url: link?.url ?? '',
         title: link?.title ?? '',
-        categories: link ? link.categories.map(catName) : nav.type === 'cat' && nav.id !== null ? [catName(nav.id)] : [],
+        categories: link ? link.categories.map(catPath) : nav.type === 'cat' && nav.id !== null ? [catPath(nav.id)] : [],
         catInput: '',
         tags: link?.tags.join(' ') ?? '',
         desc: link?.desc ?? '',
         private: link ? link.private : prefs.newPrivate,
         pinned: link?.pinned ?? false,
+        nsfw: link?.nsfw ?? false,
         secret: emptySecret(),
         // 已有账号信息要先取回来；没取到之前保存不会带上 secret，避免误清空
         secretReady: !link?.has_secret,
@@ -616,16 +870,8 @@ createApp({
         busy: false,
         ...preset,
       });
-      if (link?.has_secret) {
-        try {
-          const { secret } = await api('GET', `/links/${link.id}/secret`);
-          form.secret = { ...emptySecret(), ...secret };
-          form.secretReady = true;
-        } catch (e) {
-          form.error = '账号信息读取失败：' + e.message;
-        }
-      }
     }
+
     function fixUrl() {
       if (form.url && !/^[a-z][a-z0-9+.-]*:\/\//i.test(form.url)) form.url = 'https://' + form.url;
     }
@@ -643,7 +889,7 @@ createApp({
           desc: form.desc,
           private: form.private,
           pinned: form.pinned,
-          ...(form.secretReady && { secret: form.secret }),
+          nsfw: form.nsfw,
         };
         await (form.id ? api('PUT', `/links/${form.id}`, body) : api('POST', '/links', body));
         if (!form.id) prefs.newPrivate = form.private;
@@ -684,7 +930,9 @@ createApp({
     async function copySecret(link, field, label) {
       try {
         const { secret } = await api('GET', `/links/${link.id}/secret`);
-        if (secret?.[field]) await copy(secret[field]);
+        const entries = secretList(secret);
+        if (entries.length > 1) return (openDetail(link), say('请在详情页选择要复制的账号'));
+        if (entries[0]?.[field]) await copy(entries[0][field]);
         else say(`没有保存${label}`);
       } catch (e) {
         say(e.message);
@@ -754,7 +1002,7 @@ createApp({
       // 拖的是多选中的一张：选中的全部一起移
       const batch = sel.has(link.id) && sel.size > 1;
       const list = batch ? selectedLinks() : [link];
-      const target = catId === null ? '未分类' : `「${catName(catId)}」`;
+      const target = catId === null ? '未分类' : `「${catLabel(catId)}」`;
       try {
         let result;
         for (const l of list) result = await moveOne(l, from, catId);
@@ -786,7 +1034,7 @@ createApp({
     }
     const selectedLinks = () => st.links.filter((l) => sel.has(l.id));
     function cardClick(e, l) {
-      if (!priv.value || !(selMode.value || e.ctrlKey || e.metaKey)) return visit(l);
+      if (!priv.value || !(selMode.value || e.ctrlKey || e.metaKey || e.shiftKey)) return visit(l);
       e.preventDefault();
       selMode.value = true;
       const order = groups.value.flatMap((g) => g.links.map((x) => x.id));
@@ -845,18 +1093,20 @@ createApp({
       ]);
     }
     const moveItems = () => [
-      ...st.categories.map((c) => ({ label: c.name, run: () => batchPatch(() => ({ categories: [c.id] }), `已移到「${c.name}」`) })),
+      ...catOrder.value.map(({ cat, depth }) => ({ label: indent(depth, cat.name), run: () => batchPatch(() => ({ categories: [cat.id] }), `已移到「${catLabel(cat.id)}」`) })),
       st.categories.length ? SEP : null,
       { label: '未分类', run: () => batchPatch(() => ({ categories: [] }), '已移到未分类') },
     ];
     const addItems = () =>
-      st.categories.map((c) => ({
-        label: c.name,
-        run: () => batchPatch((l) => ({ categories: [...new Set([...l.categories, c.id])] }), `已加入「${c.name}」`),
+      catOrder.value.map(({ cat, depth }) => ({
+        label: indent(depth, cat.name),
+        run: () => batchPatch((l) => ({ categories: [...new Set([...l.categories, cat.id])] }), `已加入「${catLabel(cat.id)}」`),
       }));
     const moreItems = () => [
       { label: '设为常用', icon: 'star', run: () => batchPatch(() => ({ pinned: true }), '已设为常用') },
       { label: '取消常用', run: () => batchPatch(() => ({ pinned: false }), '已取消常用') },
+      { label: '标记为 NSFW', icon: 'nsfw', run: () => batchPatch(() => ({ nsfw: true }), '已标记为 NSFW') },
+      { label: '取消 NSFW 标记', run: () => batchPatch(() => ({ nsfw: false }), '已取消 NSFW 标记') },
       SEP,
       { label: '设为私密', icon: 'lock', run: () => batchPatch(() => ({ private: true }), '已设为私密') },
       { label: '设为公开', icon: 'unlock', run: () => batchPatch(() => ({ private: false }), '已设为公开') },
@@ -887,14 +1137,31 @@ createApp({
 
     // ---------- 分类 ----------
     const catForm = reactive({ open: false });
-    function editCat(cat = null) {
-      Object.assign(catForm, { open: true, id: cat?.id ?? null, name: cat?.name ?? '', private: cat?.private ?? false, error: '' });
+    function editCat(cat = null, preset = {}) {
+      Object.assign(catForm, {
+        open: true,
+        id: cat?.id ?? null,
+        name: cat?.name ?? '',
+        private: cat?.private ?? false,
+        nsfw: cat?.nsfw ?? false,
+        // 下拉框里用空串表示顶层
+        parent: cat?.parent_id ?? preset.parent ?? '',
+        error: '',
+      });
+    }
+    // 可以当上级的分类：不能是自己或自己的子分类，放进去之后也不能超过三层
+    function parentChoices(catId) {
+      const own = catId == null ? [] : subtreeIds(catId);
+      const height = catId == null ? 1 : catHeight(catId);
+      return catOrder.value.filter(({ cat }) => !own.includes(cat.id) && catDepth(cat.id) + height <= MAX_DEPTH);
     }
     async function saveCat() {
       try {
-        const body = { name: catForm.name, private: catForm.private };
+        const body = { name: catForm.name, private: catForm.private, nsfw: catForm.nsfw, parent_id: catForm.parent === '' ? null : Number(catForm.parent) };
         await (catForm.id ? api('PUT', `/categories/${catForm.id}`, body) : api('POST', '/categories', body));
         catForm.open = false;
+        // 新建的子分类要看得见，把它的上级展开
+        if (body.parent_id != null) delete prefs.sideFolded[body.parent_id];
         await loadData();
       } catch (e) {
         catForm.error = e.message;
@@ -902,6 +1169,7 @@ createApp({
     }
     function removeCat(target = catForm) {
       const count = catCount.value[target.id] || 0;
+      const kids = kidsOf(target.id).length;
       const run = (withLinks) => async () => {
         await api('DELETE', `/categories/${target.id}`, { with_links: withLinks });
         catForm.open = false;
@@ -910,9 +1178,13 @@ createApp({
       };
       confirmBox(
         '删除分类',
-        count ? `「${target.name}」里有 ${count} 个网址。只删除分类的话，它们会移到「未分类」。` : `确定删除「${target.name}」吗？`,
-        count
-          ? [{ label: '连同网址删除', danger: true, run: run(true) }, { label: '只删除分类', run: run(false) }]
+        count || kids
+          ? `「${target.name}」${kids ? '连同它的子分类' : ''}里有 ${count} 个网址。只删除这个分类的话，里面的网址${kids ? '和子分类' : ''}会上移一层${
+              target.parent_id == null && !kids ? '（变成未分类）' : ''
+            }。`
+          : `确定删除「${target.name}」吗？`,
+        count || kids
+          ? [{ label: kids ? '整个分类连同网址删除' : '连同网址删除', danger: true, run: run(true) }, { label: '只删除这个分类', run: run(false) }]
           : [{ label: '删除', danger: true, run: run(false) }]
       );
     }
@@ -926,7 +1198,7 @@ createApp({
     }
 
     // ---------- 右键菜单 ----------
-    // 只在私密模式接管右键；公开模式和 Shift+右键保留浏览器自带菜单
+    // 只在管理员模式接管右键；公开模式和 Shift+右键保留浏览器自带菜单
     const ctx = reactive({ open: false, x: 0, y: 0, flip: false, up: false, sub: null, at: 0, items: [] });
     // 以触摸为主的设备：提示文案用「长按」，菜单以底部面板呈现
     const coarse = matchMedia('(pointer: coarse)');
@@ -979,19 +1251,14 @@ createApp({
       if (sel.has(l.id)) return selMenu(e);
       openCtx(e, [
         { label: '查看详情', icon: 'info', run: () => openDetail(l) },
+        { label: '编辑', icon: 'edit', run: () => editLink(l) },
         SEP,
         { label: '新标签页打开', icon: 'external', run: () => open('_blank') },
         { label: '当前页打开', run: () => open('_self') },
         { label: '复制网址', icon: 'copy', run: () => copy(l.url) },
         SEP,
-        ...(l.has_secret
-          ? [
-              { label: '复制账号', run: () => copySecret(l, 'account', '账号') },
-              { label: '复制密码', run: () => copySecret(l, 'password', '密码') },
-            ]
-          : [{ label: '添加账号信息', icon: 'key', run: () => editLink(l, { secretOpen: true }) }]),
-        SEP,
         { label: l.pinned ? '取消常用' : '设为常用', icon: 'star', run: () => patchLink(l, { pinned: !l.pinned }) },
+        { label: l.nsfw ? '取消 NSFW 标记' : '标记为 NSFW', icon: 'nsfw', run: () => patchLink(l, { nsfw: !l.nsfw }) },
         {
           label: l.private ? '设为公开' : '设为私密',
           icon: l.private ? 'unlock' : 'lock',
@@ -1005,12 +1272,12 @@ createApp({
           icon: 'folder',
           // 勾选即加入、再点即移出，可以同时属于多个分类
           children: [
-            ...st.categories.map((c) => ({
-              label: c.name,
-              checked: l.categories.includes(c.id),
+            ...catOrder.value.map(({ cat, depth }) => ({
+              label: indent(depth, cat.name),
+              checked: l.categories.includes(cat.id),
               run: () =>
                 patchLink(l, {
-                  categories: l.categories.includes(c.id) ? l.categories.filter((id) => id !== c.id) : [...l.categories, c.id],
+                  categories: l.categories.includes(cat.id) ? l.categories.filter((id) => id !== cat.id) : [...l.categories, cat.id],
                 }),
             })),
             st.categories.length ? SEP : null,
@@ -1019,35 +1286,52 @@ createApp({
         },
         SEP,
         { label: '多选', icon: 'check', run: () => (sel.add(l.id), (lastSel = l.id), (selMode.value = true)) },
-        { label: '编辑', icon: 'edit', run: () => editLink(l) },
         { label: '删除', icon: 'trash', danger: true, run: () => removeLink(l) },
       ]);
     }
 
     function catMenu(e, c) {
       if (!priv.value || e.shiftKey || !c) return;
+      const moveTo = (parentId) => async () => {
+        await patchCat(c, { parent_id: parentId });
+        if (parentId != null) delete prefs.sideFolded[parentId];
+      };
+      const kids = kidsOf(c.id).length;
       openCtx(e, [
-        {
-          label: '在此分类添加网址',
-          icon: 'plus',
-          run: () => editLink(null, { categories: [c.name] }),
-        },
+        { label: '在此分类添加网址', icon: 'plus', run: () => editLink(null, { categories: [catPath(c.id)] }) },
+        catDepth(c.id) < MAX_DEPTH ? { label: '新建子分类', icon: 'folder', run: () => editCat(null, { parent: c.id }) } : null,
         {
           label: '全选此分类的网址',
           icon: 'check',
-          // 先切到这个分类再选，保证选中的都看得见
+          // 先切到这个分类再选，保证选中的都看得见；子分类里的也算
           run() {
             go('cat', c.id);
-            toggleLinks(st.links.filter((l) => l.categories.includes(c.id)));
+            const ids = new Set(subtreeIds(c.id));
+            toggleLinks(st.links.filter((l) => l.categories.some((id) => ids.has(id))));
           },
         },
         SEP,
         { label: '重命名 / 编辑', icon: 'edit', run: () => editCat(c) },
         {
+          label: '移动到',
+          icon: 'external',
+          children: [
+            { label: '顶层', checked: c.parent_id == null, run: moveTo(null) },
+            SEP,
+            ...parentChoices(c.id).map(({ cat, depth }) => ({ label: indent(depth, cat.name), checked: cat.id === c.parent_id, run: moveTo(cat.id) })),
+          ],
+        },
+        {
           label: c.private ? '设为公开分类' : '设为私密分类',
           icon: c.private ? 'unlock' : 'lock',
           run: () => patchCat(c, { private: !c.private }),
         },
+        {
+          label: c.nsfw ? '取消 NSFW 标记' : '标记为 NSFW 分类',
+          icon: 'nsfw',
+          run: () => patchCat(c, { nsfw: !c.nsfw }),
+        },
+        kids ? { label: prefs.sideFolded[c.id] ? '展开子分类' : '收起子分类', icon: 'chevron', run: () => toggleSideFold(c.id) } : null,
         SEP,
         { label: '删除分类', icon: 'trash', danger: true, run: () => removeCat(c) },
       ]);
@@ -1067,15 +1351,21 @@ createApp({
           icon: prefs.view === 'card' ? 'list' : 'grid',
           run: () => (prefs.view = prefs.view === 'card' ? 'list' : 'card'),
         },
+        { label: '收起全部分类', icon: 'chevron', run: () => foldAll(true) },
+        { label: '展开全部分类', run: () => foldAll(false) },
+        SEP,
         { label: '切到公开模式', icon: 'lock', run: toggleMode },
         { label: '设置', icon: 'settings', run: () => openSettings() },
       ]);
     }
+    // 侧栏里拖动分类：只调整它在同级里的先后。换上级用右键菜单的「移动到」
     async function moveCat({ id, index }) {
-      const list = st.categories.filter((c) => c.id !== id);
-      list.splice(index, 0, catById.value.get(id));
-      st.categories = list;
-      await api('POST', '/reorder', { type: 'categories', ids: list.map((c) => c.id) }).catch((e) => say(e.message));
+      const me = catById.value.get(id);
+      const flat = sideCats.value.map((row) => row.cat).filter((c) => c.id !== id);
+      flat.splice(index, 0, me);
+      const siblings = flat.filter((c) => (c.parent_id ?? null) === (me.parent_id ?? null));
+      siblings.forEach((c, i) => (c.sort = i));
+      await api('POST', '/reorder', { type: 'categories', ids: siblings.map((c) => c.id) }).catch((e) => say(e.message));
     }
 
     // ---------- 导入 ----------
@@ -1183,7 +1473,7 @@ createApp({
       const grid = e.target.closest?.('.grid[data-cat]');
       const side = e.target.closest?.('.cats [data-id]');
       const catId = side ? Number(side.dataset.id) : grid?.dataset.cat ? Number(grid.dataset.cat) : nav.type === 'cat' ? nav.id : null;
-      const run = () => (file ? (openImport(), readFile(file)) : addDropped(items, catName(catId)));
+      const run = () => (file ? (openImport(), readFile(file)) : addDropped(items, catPath(catId)));
       if (priv.value) run();
       else if (st.authorized) toggleMode().then(run);
       else askLogin(run);
@@ -1195,7 +1485,7 @@ createApp({
       const items = readDrop(e.clipboardData);
       if (!items.length) return;
       e.preventDefault();
-      const run = () => addDropped(items, nav.type === 'cat' ? catName(nav.id) : '');
+      const run = () => addDropped(items, nav.type === 'cat' ? catPath(nav.id) : '');
       if (priv.value) run();
       else if (st.authorized) toggleMode().then(run);
       else askLogin(run);
@@ -1221,7 +1511,7 @@ createApp({
         const result = await api('POST', '/import', { items, private: prefs.newPrivate });
         await loadData();
         const added = st.links.at(-1);
-        say(result.added ? `已添加「${added.title}」` + (category ? `到「${category}」` : '') : '这个网址已经在导航里了');
+        say(result.added ? `已添加「${added.title}」` + (category ? `到「${category.replaceAll('/', ' / ')}」` : '') : '这个网址已经在导航里了');
       } catch (e) {
         say(e.message);
       }
@@ -1241,6 +1531,7 @@ createApp({
         search: st.settings.search,
         whitelist: (st.settings.whitelist || []).join('\n'),
         newPassword: '',
+        newPassword2: '',
         currentPassword: '',
         withSecrets: false,
         agentPrivate: !!st.settings.agent?.private,
@@ -1248,6 +1539,8 @@ createApp({
         srvPort: st.settings.server?.port,
         srvHost: st.settings.server?.host,
         srvProxy: st.settings.server?.trustProxy,
+        srvOutProxy: st.settings.server?.proxy,
+        srvIconService: st.settings.server?.iconService || 'public',
         srvPublicUrl: st.settings.server?.publicUrl,
         srvDays: st.settings.server?.sessionDays,
         token: '',
@@ -1276,6 +1569,8 @@ createApp({
           port: Number(set.srvPort),
           host: set.srvHost,
           trust_proxy: set.srvProxy,
+          proxy: set.srvOutProxy,
+          icon_service: set.srvIconService,
           public_url: set.srvPublicUrl,
           session_days: Number(set.srvDays),
         });
@@ -1371,12 +1666,13 @@ GET /schema 可以取到完整的字段说明。打不开或看不懂的网址�
     document.fonts.ready.then(applyFavicon);
 
     // 选图 → （HEIC 先转码）→ 打开裁切窗口。裁切库和 HEIC 解码库都比较大，用到时才加载
-    const crop = reactive({ open: false, src: '', busy: false, error: '' });
+    const crop = reactive({ open: false, src: '', busy: false, error: '', link: null });
     const cropImg = ref(null);
     let cropper = null;
-    async function pickLogo(file) {
+    async function pickLogo(file, link = null) {
       if (!file) return;
       set.error = '';
+      crop.link = link;
       crop.busy = true;
       try {
         let blob = file;
@@ -1391,7 +1687,8 @@ GET /schema 可以取到完整的字段说明。打不开或看不懂的网址�
         crop.src = URL.createObjectURL(blob);
         openCrop();
       } catch {
-        set.error = '这个文件不是能识别的图片';
+        if (link) say('这个文件不是能识别的图片');
+        else set.error = '这个文件不是能识别的图片';
       } finally {
         crop.busy = false;
       }
@@ -1434,16 +1731,27 @@ GET /schema 可以取到完整的字段说明。打不开或看不懂的网址�
       let data = canvas.toDataURL('image/png');
       if (data.length > 280000) data = canvas.toDataURL('image/webp', 0.9);
       if (data.length > 280000) return (crop.error = '这张图细节太多，压缩后仍然过大，请换一张简单些的');
+      if (crop.link) {
+        // 给某个网址换图标：直接保存，用完把图丢掉（设置里的「重新裁切」只对站点图标有意义）
+        const link = crop.link;
+        closeCrop();
+        URL.revokeObjectURL(crop.src);
+        Object.assign(crop, { src: '', link: null });
+        setIcon(link, data);
+        iconPick.chosen = -1;
+        return;
+      }
       set.logoImage = data;
       set.logoMode = 'image';
       closeCrop();
     }
-    const saveSafe = () =>
-      saveSettings({
-        current_password: set.currentPassword,
-        whitelist: set.whitelist.split(/\s+/).filter(Boolean),
-        ...(set.newPassword && { new_password: set.newPassword }),
-      });
+    // 白名单和改密码各有各的保存按钮，互不牵连
+    const saveWhitelist = () =>
+      saveSettings({ current_password: set.currentPassword, whitelist: set.whitelist.split(/\s+/).filter(Boolean) });
+    const changePassword = () => {
+      if (set.newPassword !== set.newPassword2) return (set.error = '两次输入的新密码不一致');
+      saveSettings({ current_password: set.currentPassword, new_password: set.newPassword });
+    };
     function addMyIp() {
       if (!set.whitelist.split(/\s+/).includes(st.ip)) set.whitelist = (set.whitelist.trim() + '\n' + st.ip).trim();
     }
@@ -1467,7 +1775,7 @@ GET /schema 可以取到完整的字段说明。打不开或看不懂的网址�
 
     // ---------- 快捷键 ----------
     const help = reactive({ open: false });
-    const modals = [ask, help, crop, login, form, catForm, imp, set];
+    const modals = [accountEdit, ask, help, crop, login, form, catForm, imp, set];
     document.addEventListener('keydown', (e) => {
       const typing = /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName);
       const open = modals.find((m) => m.open);
@@ -1530,21 +1838,23 @@ GET /schema 可以取到完整的字段说明。打不开或看不懂的网址�
       prefs, accents, isDark, toggleTheme, st, priv, toast, load,
       nav, query, tag, tagsOpen, vis, sort, menuOpen, searchEl,
       catCount, pinnedCount, recentCount, tagList, shown, groups, heading, go, resetFilters,
-      visit, searchEnter, iconOk, iconBad, iconUrl, host, color, isPrivate,
-      login, toggleMode, doLogin, doSetup, ask,
-      page, pageLink, openDetail, closePage, fmtTime, startEdit, saveDetail, copy, agentSave, agentPrompt,
-      form, secretFilled, formCatPrivate, editLink, fixUrl, saveLink, removeLink, moveLink, canDrag, addFormCat,
+      catById, kidsOf, catPath, catLabel, catPrivate, catOrder, hasNested, sideCats, toggleSideFold, toggleFold, indent, parentChoices,
+      visit, searchEnter, iconOk, iconSrc, iconShow, iconLoaded, iconFailed, host, color, isPrivate,
+      login, toggleMode, toggleWork, NSFW_MODES, catNsfw, isNsfw, cardTip, doLogin, doSetup, ask,
+      accountEdit, pageAccounts, detailSections, formLink, secBlur, secCancel, iconPick, loadIconChoices, chooseIcon, editAccount, saveAccount, emptySecret, uploadIcon, setIcon, refetchIcon, page, pageLink, openDetail, closePage, fmtTime, startEdit, saveDetail, copy, agentSave, agentPrompt,
+      form, formCatPrivate, editLink, fixUrl, saveLink, removeLink, moveLink, canDrag, addFormCat,
       drag, dropCat, cardDragStart, cardDragEnd, catDragOver, catDrop,
       sel, selMode, exitSel, cardClick, allIn, toggleLinks, allSelected, toggleAll, batchDelete, batchMenu,
       ctx, ctxEl, runCtx, linkMenu, catMenu, blankMenu, isTouch,
       catForm, editCat, saveCat, removeCat, moveCat,
       dropping, imp, impCount, openImport, readFile, onDrop, toggleAllFolders, doImport,
       help, set, openSettings, pickLogo, saveServer, saveSite, logoIsImage, logoText, logoScale,
-      crop, cropImg, openCrop, initCropper, cropDo, closeCrop, confirmCrop, saveSafe, addMyIp, exportData, bookmarklet,
+      crop, cropImg, openCrop, initCropper, cropDo, closeCrop, confirmCrop, saveWhitelist, changePassword, addMyIp, exportData, bookmarklet,
     };
   },
 })
   .component('modal', Modal)
+  .component('pw-input', PwInput)
   .directive('sortable', vSortable)
   .directive('hold', vHold)
   .directive('focus', { mounted: (el) => el.focus() })

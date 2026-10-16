@@ -39,12 +39,14 @@
       <button v-if="priv" class="ib" title="新建分类" @click="editCat()"><i class="ic ic-plus"></i></button>
     </div>
     <div class="cats">
-      <div class="nav" v-sortable="{enabled: priv, onMove: moveCat}">
-        <button v-for="c in st.categories" :key="c.id" :data-id="c.id" class="nav-item"
-                :class="{on: nav.type === 'cat' && nav.id === c.id, 'drop-target': drag && dropCat === c.id}" @click="go('cat', c.id)" @contextmenu="catMenu($event, c)"
+      <div class="nav" :class="{nested: hasNested}" v-sortable="{enabled: priv, onMove: moveCat}">
+        <button v-for="{ cat: c, depth } in sideCats" :key="c.id" :data-id="c.id" class="nav-item" :style="{paddingLeft: 8 + depth * 14 + 'px'}"
+                :class="{on: nav.type === 'cat' && nav.id === c.id, 'drop-target': drag && dropCat === c.id, blurred: prefs.nsfwMode === 'blur' && catNsfw(c.id)}" @click="go('cat', c.id)" @contextmenu="catMenu($event, c)"
                 @dragover="catDragOver($event, c.id)" @dragleave="dropCat = undefined" @drop="catDrop($event, c.id)"
                 v-hold="(e) => catMenu(e, c)">
-          <span class="avatar" :style="{background: color(c.name)}">{{ c.name.slice(0, 1) }}</span>
+          <i class="ic ic-chevron twist" :class="{open: !prefs.sideFolded[c.id], leaf: !kidsOf(c.id).length}" role="button"
+             :title="prefs.sideFolded[c.id] ? '展开子分类' : '收起子分类'" @click.stop="toggleSideFold(c.id)"></i>
+          <span class="avatar" :class="{small: depth > 0}" :style="{background: color(c.name)}">{{ c.name.slice(0, 1) }}<i v-if="c.nsfw" class="nsfw-dot" title="NSFW 分类"></i></span>
           <span class="name">{{ c.name }} <i v-if="c.private" class="ic ic-lock mini" title="私密分类"></i></span>
           <span class="count">{{ catCount[c.id] || 0 }}</span>
           <span v-if="priv" class="ib act" role="button" tabindex="0" title="编辑分类"
@@ -52,6 +54,7 @@
         </button>
         <button v-if="catCount.none" class="nav-item" :class="{on: nav.type === 'cat' && nav.id === null, 'drop-target': drag && dropCat === null}" @click="go('cat', null)"
                 @dragover="catDragOver($event, null)" @dragleave="dropCat = undefined" @drop="catDrop($event, null)">
+          <i class="ic ic-chevron twist leaf"></i>
           <span class="avatar" style="background: var(--t4)">·</span>
           <span class="name">未分类</span><span class="count">{{ catCount.none }}</span>
         </button>
@@ -73,109 +76,117 @@
         <button class="btn ghost" @click="closePage"><i class="ic ic-back"></i>返回</button>
         <span class="spacer"></span>
         <template v-if="priv">
-          <template v-if="page.editing">
-            <button class="btn ghost" @click="page.editing = false">取消</button>
-            <button class="btn primary" :disabled="page.busy" @click="saveDetail">保存详情</button>
-          </template>
-          <template v-else>
-            <button class="btn ghost" @click="editLink(pageLink)">基本信息</button>
-            <button class="btn" @click="startEdit"><i class="ic ic-edit"></i>编辑详情</button>
-          </template>
+          <button class="btn ghost" @click="editLink(pageLink)">基本信息</button>
         </template>
       </div>
 
       <div class="page-body">
-        <header class="hero">
-          <span class="favicon" :class="{ok: prefs.icons && iconOk.has(host(pageLink))}">
+        <header class="hero" :class="{blurred: isNsfw(pageLink) && prefs.nsfwMode === 'blur'}">
+          <span class="favicon" :class="{ok: prefs.icons && iconOk.has(pageLink.id)}">
             <span class="avatar" :style="{background: color(host(pageLink))}">{{ pageLink.title.slice(0, 1).toUpperCase() }}</span>
-            <img v-if="prefs.icons && !iconBad.has(host(pageLink))" :src="iconUrl(pageLink)" alt="" referrerpolicy="no-referrer"
-                 @load="iconOk.add(host(pageLink))" @error="iconBad.add(host(pageLink))">
+            <img v-if="iconShow(pageLink)" :src="iconSrc(pageLink)" alt="" referrerpolicy="no-referrer"
+                 @load="iconLoaded(pageLink)" @error="iconFailed(pageLink)">
           </span>
           <div class="grow">
             <h2>{{ pageLink.title }}</h2>
             <a class="url" :href="pageLink.url" target="_blank" rel="noopener noreferrer" @click="visit(pageLink)">{{ pageLink.url }}</a>
             <p v-if="pageLink.desc">{{ pageLink.desc }}</p>
             <div class="marks">
-              <span class="mark" v-for="id in pageLink.categories" :key="'c' + id">{{ st.categories.find(c => c.id === id)?.name }}</span>
+              <span class="mark" v-for="id in pageLink.categories" :key="'c' + id">{{ catLabel(id) }}</span>
               <span class="mark tag" v-for="t in pageLink.tags" :key="'t' + t"># {{ t }}</span>
               <span class="mark" v-if="pageLink.pinned"><i class="ic ic-star"></i>常用</span>
+              <span class="mark nsfw" v-if="isNsfw(pageLink)">NSFW</span>
               <span class="mark" v-if="isPrivate(pageLink)"><i class="ic ic-lock"></i>私密</span>
             </div>
           </div>
           <a class="btn primary" :href="pageLink.url" target="_blank" rel="noopener noreferrer" @click="visit(pageLink)"><i class="ic ic-external"></i>打开</a>
         </header>
 
-        <!-- 编辑详情 -->
-        <template v-if="page.editing">
-          <label class="field"><span>简介（这个网站是什么、用来做什么）</span>
-            <textarea class="input" rows="3" v-model="page.draft.summary" v-focus></textarea></label>
-          <label class="field"><span>功能亮点（每行一条）</span>
-            <textarea class="input" rows="4" v-model="page.draft.features"></textarea></label>
-          <label class="field"><span>使用笔记（注意事项、技巧、收费情况等）</span>
-            <textarea class="input" rows="4" v-model="page.draft.notes"></textarea></label>
-          <div class="field"><span>相关链接（文档、登录页、状态页等）</span>
-            <div class="kv" v-for="(r, i) in page.draft.links" :key="i">
-              <input class="input" v-model="r.label" placeholder="名称">
-              <input class="input" v-model="r.url" placeholder="https://">
-              <button class="ib" title="移除" @click="page.draft.links.splice(i, 1)"><i class="ic ic-x"></i></button>
-            </div>
-            <div><button class="btn ghost" @click="page.draft.links.push({label: '', url: ''})"><i class="ic ic-plus"></i>添加链接</button></div>
+        <!-- 详情的四个栏目：标题右侧的「编辑」悬停时出现，点开后就地编辑这一栏 -->
+        <section class="sec" v-for="s in detailSections" :key="s.key" :class="{editing: page.editing === s.key}"
+                 @focusout="secBlur($event, s.key)" @keydown.esc.stop="secCancel(s.key)">
+          <div class="sec-head">
+            <h3>{{ s.title }}</h3>
+            <button v-if="priv && page.editing !== s.key" class="ib sec-edit" :title="'编辑' + s.title" :disabled="page.busy || !!page.editing" @click="startEdit(s.key)"><i class="ic ic-edit"></i></button>
           </div>
-        </template>
 
-        <!-- 查看详情：四个栏目始终都在，没填的显示「未填写」 -->
-        <template v-else>
-          <div class="box none" v-if="!pageLink.detail && priv">
-            <span>还没有填写详情。</span>
-            <button class="btn" @click="startEdit">手动填写</button>
-            <button class="btn ghost" @click="openSettings('agent')">接入智能体自动补全</button>
-          </div>
-          <section><h3>简介</h3>
-            <p class="text" v-if="pageLink.detail?.summary">{{ pageLink.detail.summary }}</p>
-            <p class="hint" v-else>未填写</p></section>
-          <section><h3>功能亮点</h3>
-            <ul v-if="pageLink.detail?.features.length"><li v-for="(f, i) in pageLink.detail.features" :key="i">{{ f }}</li></ul>
-            <p class="hint" v-else>未填写</p></section>
-          <section><h3>使用笔记</h3>
-            <p class="text" v-if="pageLink.detail?.notes">{{ pageLink.detail.notes }}</p>
-            <p class="hint" v-else>未填写</p></section>
-          <section><h3>相关链接</h3>
-            <div class="box" v-if="pageLink.detail?.links.length">
+          <template v-if="page.editing === s.key">
+            <textarea v-if="s.key !== 'links'" class="input" :rows="s.key === 'summary' ? 3 : 5" v-model="page.draft[s.key]" v-focus :placeholder="s.hint"></textarea>
+            <!-- 编辑器本身可以拿焦点：进入编辑时焦点落在这里，才不会被当成「点了外面」 -->
+            <div v-else class="link-editor" tabindex="-1" v-focus>
+              <div class="link-row head" v-if="page.draft.links.length"><span>名称</span><span>网址</span><span></span></div>
+              <div class="link-row" v-for="(r, i) in page.draft.links" :key="i">
+                <input class="input" v-model="r.label" placeholder="如：帮助中心" :aria-label="'链接 ' + (i + 1) + ' 名称'">
+                <input class="input" v-model="r.url" placeholder="https://" :aria-label="'链接 ' + (i + 1) + ' 网址'">
+                <button class="ib" title="移除这一条" @click="page.draft.links.splice(i, 1)"><i class="ic ic-x"></i></button>
+              </div>
+              <div><button class="btn ghost" @click="page.draft.links.push({label: '', url: ''})"><i class="ic ic-plus"></i>添加链接</button></div>
+            </div>
+            <div class="sec-actions"><span class="hint">{{ s.key === 'features' ? '每行一条。' : '' }}点别处自动保存，按 Esc 放弃修改</span></div>
+          </template>
+
+          <template v-else-if="s.key === 'features'">
+            <ul v-if="pageLink.detail?.features?.length"><li v-for="(f, i) in pageLink.detail.features" :key="i">{{ f }}</li></ul>
+            <p class="hint" v-else>未填写</p>
+          </template>
+          <template v-else-if="s.key === 'links'">
+            <div class="box" v-if="pageLink.detail?.links?.length">
               <a class="info-row rel" v-for="(r, i) in pageLink.detail.links" :key="i" :href="r.url" target="_blank" rel="noopener noreferrer">
                 <span class="grow">{{ r.label || r.url }}</span><span class="hint">{{ host(r) }}</span><i class="ic ic-external"></i>
               </a>
             </div>
-            <p class="hint" v-else>未填写</p></section>
-        </template>
-
-        <!-- 账号信息：只在私密模式出现，智能体接口读不到 -->
-        <section v-if="priv && !page.editing"><h3>账号信息 <small>仅私密模式可见</small></h3>
-          <div class="hint" v-if="page.loading">加载中…</div>
-          <div class="err" v-else-if="page.error">{{ page.error }}</div>
-          <div class="box" v-else-if="page.secret">
-            <div class="info-row" v-if="page.secret.account">
-              <label>账号</label><span class="val">{{ page.secret.account }}</span>
-              <button class="ib" title="复制" @click="copy(page.secret.account)"><i class="ic ic-copy"></i></button>
-            </div>
-            <div class="info-row" v-if="page.secret.password">
-              <label>密码</label><span class="val">{{ page.show ? page.secret.password : '••••••••' }}</span>
-              <button class="ib" :title="page.show ? '隐藏' : '显示'" @click="page.show = !page.show"><i class="ic" :class="page.show ? 'ic-eye-off' : 'ic-eye'"></i></button>
-              <button class="ib" title="复制" @click="copy(page.secret.password)"><i class="ic ic-copy"></i></button>
-            </div>
-            <div class="info-row" v-for="(f, i) in page.secret.extra" :key="i">
-              <label :title="f.k">{{ f.k || '其他' }}</label><span class="val">{{ f.v }}</span>
-              <button class="ib" title="复制" @click="copy(f.v)"><i class="ic ic-copy"></i></button>
-            </div>
-            <div class="info-row" v-if="page.secret.note">
-              <label>备注</label><span class="val">{{ page.secret.note }}</span>
-            </div>
-          </div>
-          <div class="box none" v-else>
-            <span>没有保存账号信息。</span>
-            <button class="btn ghost" @click="editLink(pageLink, {secretOpen: true})">添加</button>
-          </div>
+            <p class="hint" v-else>未填写</p>
+          </template>
+          <template v-else>
+            <p class="text" v-if="pageLink.detail?.[s.key]">{{ pageLink.detail[s.key] }}</p>
+            <p class="hint" v-else>未填写</p>
+          </template>
         </section>
 
+        <!-- 账号信息：只在管理员模式出现，智能体接口读不到。一个网址可以存多个账号 -->
+        <section class="sec" v-if="priv">
+          <div class="sec-head">
+            <h3>账号信息</h3><small class="hint">仅管理员模式可见</small>
+            <button class="btn ghost sec-edit always" :disabled="page.loading || !!page.error" @click="editAccount()"><i class="ic ic-plus"></i>添加账号</button>
+          </div>
+          <div class="hint" v-if="page.loading">加载中…</div>
+          <div class="err" v-else-if="page.error">{{ page.error }} <button class="btn ghost" @click="load">重试</button></div>
+          <template v-else>
+            <div class="box account" v-for="(account, index) in pageAccounts" :key="index">
+              <!-- 第一行：账号和密码并排，各自带复制 -->
+              <div class="acct-main">
+                <i class="ic ic-key"></i>
+                <span class="acct-field">
+                  <label>账号</label>
+                  <span class="acct-name" :title="account.account">{{ account.account || '（未填账号）' }}</span>
+                  <button v-if="account.account" class="ib dot" title="复制账号" @click="copy(account.account)"><i class="ic ic-copy"></i></button>
+                </span>
+                <span class="acct-field" :class="{empty: !account.password}">
+                  <label>密码</label>
+                  <span class="acct-pw" v-if="!account.password">未填</span>
+                  <template v-else>
+                  <span class="acct-pw" :title="page.show === index ? account.password : ''">{{ page.show === index ? account.password : '••••••••' }}</span>
+                  <button class="ib dot" :title="page.show === index ? '隐藏密码' : '显示密码'" @click="page.show = page.show === index ? false : index"><i class="ic" :class="page.show === index ? 'ic-eye' : 'ic-eye-off'"></i></button>
+                  <button class="ib dot" title="复制密码" @click="copy(account.password)"><i class="ic ic-copy"></i></button>
+                  </template>
+                </span>
+                <button class="ib acct-edit" title="编辑这个账号" @click="editAccount(index)"><i class="ic ic-edit"></i></button>
+              </div>
+              <!-- 其余字段是次要信息，字小一号 -->
+              <div class="acct-more" v-if="account.extra?.length || account.note">
+                <div class="acct-line" v-for="(f, i) in account.extra" :key="i">
+                  <label :title="f.k">{{ f.k || '其他' }}</label><span class="val">{{ f.v }}</span>
+                  <button class="ib dot" title="复制" @click="copy(f.v)"><i class="ic ic-copy"></i></button>
+                </div>
+                <div class="acct-line" v-if="account.note"><label>备注</label><span class="val">{{ account.note }}</span></div>
+              </div>
+            </div>
+            <div class="box none" v-if="!pageAccounts.length">
+              <span>没有保存账号信息。</span>
+              <button class="btn ghost" @click="editAccount()">添加</button>
+            </div>
+          </template>
+        </section>
         <section v-if="priv && !page.editing"><h3>记录</h3>
           <div class="box">
             <div class="info-row"><label>添加时间</label><span class="val">{{ fmtTime(pageLink.created_at) }}</span></div>
@@ -191,7 +202,7 @@
       <div class="top-row">
         <button v-if="!prefs.sidebar" class="ib" title="展开侧栏" @click="prefs.sidebar = true"><i class="ic ic-sidebar"></i></button>
         <h2>{{ heading }}</h2>
-        <span class="meta grow">{{ shown.length }} 个网址<template v-if="priv"> · 私密模式</template></span>
+        <span class="meta grow">{{ shown.length }} 个网址<template v-if="priv"> · 管理员模式</template></span>
         <div class="search">
           <i class="ic ic-search"></i>
           <input ref="searchEl" class="input" v-model.trim="query" placeholder="搜索名称、网址、标签，支持拼音"
@@ -199,8 +210,11 @@
           <button v-if="query" class="ib" title="清除" @click="query = ''"><i class="ic ic-x"></i></button>
           <kbd v-else>Ctrl K</kbd>
         </div>
-        <button class="btn mode" :class="{private: priv}" :title="priv ? '当前为私密模式，点击切回公开' : '当前为公开模式，点击进入私密'" @click="toggleMode">
-          <i class="ic" :class="priv ? 'ic-unlock' : 'ic-lock'"></i>{{ priv ? '私密' : '公开' }}
+        <button class="btn workmode" :title="NSFW_MODES[prefs.nsfwMode].tip + '。点击切换'" @click="toggleWork">
+          <i class="dot" :class="prefs.nsfwMode"></i>{{ NSFW_MODES[prefs.nsfwMode].label }}
+        </button>
+        <button class="btn mode" :class="{private: priv}" :title="priv ? '当前为管理员模式，点击切回公开' : '当前为公开模式，点击进入管理员模式'" @click="toggleMode">
+          <i class="ic" :class="priv ? 'ic-unlock' : 'ic-lock'"></i>{{ priv ? '管理员' : '公开' }}
         </button>
         <button class="ib" title="切换明暗" @click="toggleTheme"><i class="ic" :class="isDark ? 'ic-sun' : 'ic-moon'"></i></button>
         <div class="menu-wrap" v-if="priv">
@@ -251,9 +265,9 @@
       </div>
       <form class="empty" v-else-if="!st.setup" @submit.prevent="doSetup">
         <i class="ic ic-lock"></i>
-        <p>欢迎使用。先设置一个管理密码，之后用它进入私密模式。</p>
+        <p>欢迎使用。先设置一个管理密码，之后用它进入管理员模式。</p>
         <div class="row">
-          <input class="input" type="password" v-model="login.password" placeholder="至少 6 位" autocomplete="new-password" style="width: 200px">
+          <pw-input v-model="login.password" placeholder="至少 6 位" autocomplete="new-password" style="width: 220px"></pw-input>
           <button class="btn primary" :disabled="login.busy">开始使用</button>
         </div>
         <p class="err" v-if="login.error">{{ login.error }}</p>
@@ -266,7 +280,7 @@
         </template>
         <template v-else>
           <p>这里还没有公开的网址。</p>
-          <div class="row"><button class="btn" @click="toggleMode">进入私密模式</button></div>
+          <div class="row"><button class="btn" @click="toggleMode">进入管理员模式</button></div>
         </template>
       </div>
       <div class="empty" v-else-if="!shown.length">
@@ -277,22 +291,24 @@
       </div>
 
       <template v-else>
-        <section class="group" v-for="g in groups" :key="g.key">
-          <div class="group-head" v-if="g.name" @contextmenu="catMenu($event, st.categories.find(c => c.id === g.catId))">
+        <section class="group" v-for="g in groups" :key="g.key" :class="['depth-' + g.depth, {folded: g.folded, blurred: prefs.nsfwMode === 'blur' && g.catId && catNsfw(g.catId)}]">
+          <div class="group-head" v-if="g.name" :class="{foldable: g.foldable}" :title="g.folded ? '点击展开' : '点击收起'"
+               @click="g.foldable && toggleFold(g.catId ?? 'none')" @contextmenu="catMenu($event, catById.get(g.catId))">
+            <i class="ic ic-chevron twist" :class="{open: !g.folded}"></i>
             <h3>{{ g.name }}</h3>
             <i v-if="g.private" class="ic ic-lock" title="私密分类"></i>
-            <span>{{ g.links.length }} 个</span>
-            <button v-if="selMode" class="pick" @click="toggleLinks(g.links)">{{ allIn(g.links) ? '取消全选' : '全选' }}</button>
+            <span>{{ g.all.length }} 个</span>
+            <button v-if="selMode" class="pick" @click.stop="toggleLinks(g.all)">{{ allIn(g.all) ? '取消全选' : '全选' }}</button>
           </div>
-          <div class="grid" :class="{list: prefs.view === 'list'}" :data-cat="g.catId === undefined ? null : (g.catId ?? '')"
+          <div class="grid" v-if="!g.folded" :class="{list: prefs.view === 'list'}" :data-cat="g.catId === undefined ? null : (g.catId ?? '')"
                v-sortable="{enabled: canDrag, group: 'links', onMove: moveLink}">
-            <a v-for="l in g.links" :key="l.id" :data-id="l.id" class="card" :class="{selected: sel.has(l.id)}" :href="l.url"
-               :target="prefs.newTab ? '_blank' : null" rel="noopener noreferrer" :title="l.url" @click="cardClick($event, l)" @contextmenu="linkMenu($event, l)"
+            <a v-for="l in g.links" :key="l.id" :data-id="l.id" class="card" :class="{selected: sel.has(l.id), nsfw: isNsfw(l), blurred: isNsfw(l) && prefs.nsfwMode === 'blur'}" :href="l.url"
+               :target="prefs.newTab ? '_blank' : null" rel="noopener noreferrer" :title="cardTip(l)" @click="cardClick($event, l)" @contextmenu="linkMenu($event, l)"
                @dragstart="cardDragStart($event, l)" @dragend="cardDragEnd" v-hold="(e) => linkMenu(e, l)">
-              <span class="favicon" :class="{ok: prefs.icons && iconOk.has(host(l))}">
+              <span class="favicon" :class="{ok: prefs.icons && iconOk.has(l.id)}">
                 <span class="avatar" :style="{background: color(host(l))}">{{ l.title.slice(0, 1).toUpperCase() }}</span>
-                <img v-if="prefs.icons && !iconBad.has(host(l))" :src="iconUrl(l)" alt="" loading="lazy" draggable="false" referrerpolicy="no-referrer"
-                     @load="iconOk.add(host(l))" @error="iconBad.add(host(l))">
+                <img v-if="iconShow(l)" :src="iconSrc(l)" alt="" loading="lazy" draggable="false" referrerpolicy="no-referrer"
+                     @load="iconLoaded(l)" @error="iconFailed(l)">
               </span>
               <span class="txt">
                 <b class="title">{{ l.title }}</b>
@@ -304,7 +320,7 @@
         </section>
         <p class="foot-hint" v-if="priv && !selMode">
           <template v-if="isTouch">长按网址可以查看详情、收藏、编辑、调整分类，也可以进入多选</template>
-          <template v-else>右键网址可查看详情和进行更多操作，分类同样可以右键；拖动卡片可以排序或移入其他分类；按住 <kbd>Ctrl</kbd> 点击卡片可以多选；复制的网址可以直接 <kbd>Ctrl</kbd> <kbd>V</kbd> 粘贴进来。想用浏览器自带的右键菜单时，按住 <kbd>Shift</kbd> 再点右键</template>
+          <template v-else>右键网址可查看详情和进行更多操作，分类同样可以右键；拖动卡片可以排序或移入其他分类；按住 <kbd>Ctrl</kbd> 或 <kbd>Shift</kbd> 点击卡片可以多选；复制的网址可以直接 <kbd>Ctrl</kbd> <kbd>V</kbd> 粘贴进来。想用浏览器自带的右键菜单时，按住 <kbd>Shift</kbd> 再点右键</template>
         </p>
       </template>
     </div>
@@ -322,11 +338,11 @@
     </div>
   </main>
 
-  <!-- ========== 进入私密模式 ========== -->
-  <modal v-if="login.open" title="进入私密模式" width="340px" @close="login.open = false">
+  <!-- ========== 进入管理员模式 ========== -->
+  <modal v-if="login.open" title="进入管理员模式" width="340px" @close="login.open = false">
     <form class="field" id="login-form" @submit.prevent="doLogin">
       <span>管理密码</span>
-      <input class="input" type="password" v-model="login.password" v-focus autocomplete="current-password">
+      <pw-input v-model="login.password" autofocus autocomplete="current-password"></pw-input>
       <span class="err" v-if="login.error">{{ login.error }}</span>
     </form>
     <template #foot>
@@ -354,9 +370,9 @@
         <div class="picker">
           <span class="chip on" v-for="(name, i) in form.categories" :key="name">{{ name }}
             <i class="ic ic-x" role="button" title="移除" @click.prevent="form.categories.splice(i, 1)"></i></span>
-          <input v-model="form.catInput" list="cat-list" :placeholder="form.categories.length ? '继续添加' : '选择或输入新分类，回车确认'"
+          <input v-model="form.catInput" list="cat-list" :placeholder="form.categories.length ? '继续添加' : '选择或输入，回车确认；用 / 表示子分类，如 开发/前端'"
                  @change="addFormCat" @keydown.enter.prevent="addFormCat">
-          <datalist id="cat-list"><option v-for="c in st.categories" :key="c.id" :value="c.name"></option></datalist>
+          <datalist id="cat-list"><option v-for="{ cat } in catOrder" :key="cat.id" :value="catPath(cat.id)"></option></datalist>
         </div>
       </div>
       <label class="field"><span>描述</span>
@@ -365,30 +381,32 @@
       <div class="row" style="gap: calc(var(--gap) * 2.5)">
         <label class="switch"><input type="checkbox" v-model="form.private"><i></i>私密</label>
         <label class="switch"><input type="checkbox" v-model="form.pinned"><i></i>常用</label>
+        <label class="switch" title="工作模式下不显示"><input type="checkbox" v-model="form.nsfw"><i></i>NSFW</label>
         <span class="hint" v-if="formCatPrivate && !form.private">所在分类是私密的，公开模式下同样不可见</span>
       </div>
 
-      <div class="box">
-        <button type="button" class="box-head" @click="form.secretOpen = !form.secretOpen">
-          <i class="ic ic-key"></i><span class="grow">账号信息</span>
-          <span class="hint">{{ form.secretOpen ? '只在私密模式下可见，加密保存' : (secretFilled ? '已填写' : '可选') }}</span>
-        </button>
-        <div class="box-body" v-if="form.secretOpen">
-          <div class="cols">
-            <input class="input" v-model="form.secret.account" placeholder="账号" autocomplete="off">
-            <div class="pw">
-              <input class="input" :type="form.showPw ? 'text' : 'password'" v-model="form.secret.password" placeholder="密码" autocomplete="new-password">
-              <button type="button" class="ib" tabindex="-1" @click="form.showPw = !form.showPw"><i class="ic" :class="form.showPw ? 'ic-eye-off' : 'ic-eye'"></i></button>
-            </div>
-          </div>
-          <div class="kv" v-for="(f, i) in form.secret.extra" :key="i">
-            <input class="input" v-model="f.k" placeholder="名称">
-            <input class="input" v-model="f.v" placeholder="内容" autocomplete="off">
-            <button type="button" class="ib" title="移除" @click="form.secret.extra.splice(i, 1)"><i class="ic ic-x"></i></button>
-          </div>
-          <textarea class="input" rows="2" v-model="form.secret.note" placeholder="备注"></textarea>
-          <div class="row"><button type="button" class="btn ghost" @click="form.secret.extra.push({k: '', v: ''})"><i class="ic ic-plus"></i>自定义字段</button>
-            <span class="hint">如邮箱、手机号、密保答案、API Key</span></div>
+      <!-- 网站图标：打开弹窗就把这个网站的候选图标都列出来（有缓存），点哪个用哪个 -->
+      <div class="field icon-field" v-if="formLink">
+        <span>网站图标 <small class="hint">点一下就换上，立即生效</small>
+          <button type="button" class="link-btn" :disabled="iconPick.loading" @click="loadIconChoices(formLink, true)">{{ iconPick.loading ? '查找中…' : '重新查找' }}</button></span>
+        <div class="icon-picks">
+          <button type="button" class="icon-pick" :class="{on: !formLink.custom_icon}" :disabled="iconPick.busy" title="由服务器自动选择" @click="formLink.custom_icon && setIcon(formLink, '')">
+            <span class="favicon small" :class="{ok: prefs.icons && iconOk.has(formLink.id) && !formLink.custom_icon}">
+              <span class="avatar" :style="{background: color(host(formLink))}">{{ formLink.title.slice(0, 1).toUpperCase() }}</span>
+              <img v-if="iconShow(formLink) && !formLink.custom_icon" :src="iconSrc(formLink)" alt="" @load="iconLoaded(formLink)" @error="iconFailed(formLink)">
+            </span>
+            <small>自动</small>
+          </button>
+          <button type="button" v-for="(ic, i) in iconPick.icons" :key="i" class="icon-pick" :class="{on: formLink.custom_icon && iconPick.chosen === i}" :disabled="iconPick.busy"
+                  :title="ic.source + (ic.size ? '，声明尺寸 ' + ic.size + 'px' : '') + '\n' + ic.url" @click="chooseIcon(formLink, ic, i)">
+            <img :src="ic.src" alt="" @load="ic.w = $event.target.naturalWidth; ic.h = $event.target.naturalHeight">
+            <small>{{ ic.w ? ic.w + '×' + ic.h : '…' }}</small>
+          </button>
+          <button type="button" class="icon-pick add" :class="{on: formLink.custom_icon && iconPick.chosen === -1}" title="上传自己的图片" @click="uploadIcon(formLink)">
+            <i class="ic ic-upload"></i><small>上传</small>
+          </button>
+          <span class="hint" v-if="iconPick.loading && !iconPick.icons.length">正在查找这个网站的图标…</span>
+          <span class="hint" v-else-if="iconPick.error">{{ iconPick.error }}</span>
         </div>
       </div>
       <span class="err" v-if="form.error">{{ form.error }}</span>
@@ -401,11 +419,47 @@
     </template>
   </modal>
 
+  <!-- ========== 账号信息 ========== -->
+  <modal v-if="accountEdit.open && priv" :title="accountEdit.index < 0 ? '添加账号' : '编辑账号'" @close="accountEdit.open = false">
+    <form id="account-form" style="display: contents" @submit.prevent="saveAccount()">
+      <div class="cols">
+        <label class="field"><span>账号</span>
+          <input class="input" v-model="accountEdit.draft.account" v-focus autocomplete="off" placeholder="用户名、邮箱或手机号"></label>
+        <label class="field"><span>密码</span>
+          <pw-input v-model="accountEdit.draft.password" autocomplete="new-password"></pw-input></label>
+      </div>
+      <div class="field">
+        <span>自定义字段 <small class="hint">如恢复邮箱、密保答案、API Key</small></span>
+        <div class="kv" v-for="(f, i) in accountEdit.draft.extra" :key="i">
+          <input class="input" v-model="f.k" placeholder="名称">
+          <input class="input" v-model="f.v" placeholder="内容" autocomplete="off">
+          <button type="button" class="ib" title="移除" @click="accountEdit.draft.extra.splice(i, 1)"><i class="ic ic-x"></i></button>
+        </div>
+        <div><button type="button" class="btn ghost" @click="accountEdit.draft.extra.push({k: '', v: ''})"><i class="ic ic-plus"></i>添加字段</button></div>
+      </div>
+      <label class="field"><span>备注</span>
+        <textarea class="input" rows="2" v-model="accountEdit.draft.note"></textarea></label>
+      <span class="err" v-if="accountEdit.error">{{ accountEdit.error }}</span>
+    </form>
+    <template #foot>
+      <button v-if="accountEdit.index >= 0" class="btn ghost danger" :disabled="accountEdit.busy" @click="saveAccount(true)"><i class="ic ic-trash"></i>删除此账号</button>
+      <span class="spacer"></span>
+      <button class="btn ghost" :disabled="accountEdit.busy" @click="accountEdit.open = false">取消</button>
+      <button class="btn primary" form="account-form" :disabled="accountEdit.busy">保存</button>
+    </template>
+  </modal>
+
   <!-- ========== 分类 ========== -->
   <modal v-if="catForm.open" :title="catForm.id ? '编辑分类' : '新建分类'" width="340px" @close="catForm.open = false">
     <form id="cat-form" style="display: contents" @submit.prevent="saveCat">
       <label class="field"><span>名称</span><input class="input" v-model.trim="catForm.name" v-focus required maxlength="40"></label>
+      <label class="field"><span>上级分类（最多三层）</span>
+        <select class="input" v-model="catForm.parent">
+          <option value="">没有，作为顶层分类</option>
+          <option v-for="{ cat, depth } in parentChoices(catForm.id)" :key="cat.id" :value="cat.id">{{ indent(depth, cat.name) }}</option>
+        </select></label>
       <label class="switch"><input type="checkbox" v-model="catForm.private"><i></i>私密分类（其中的网址公开模式下全部隐藏）</label>
+      <label class="switch"><input type="checkbox" v-model="catForm.nsfw"><i></i>NSFW 分类（其中的网址在工作模式下全部隐藏）</label>
       <span class="err" v-if="catForm.error">{{ catForm.error }}</span>
     </form>
     <template #foot>
@@ -435,11 +489,11 @@
       </div>
       <div class="box folders">
         <label v-for="f in imp.folders" :key="f.name">
-          <input type="checkbox" v-model="f.on"><span>{{ f.name || '未分类' }}</span><small>{{ f.count }}</small>
+          <input type="checkbox" v-model="f.on"><span>{{ f.name ? f.name.replaceAll('/', ' / ') : '未分类' }}</span><small>{{ f.count }}</small>
         </label>
       </div>
       <label class="switch"><input type="checkbox" v-model="imp.private"><i></i>全部导入为私密（之后可以逐个公开）</label>
-      <span class="hint">文件夹会成为分类；已存在的网址自动跳过。</span>
+      <span class="hint">文件夹会成为分类，层级照原样保留（最多三层，更深的并入第三层）；已存在的网址自动跳过。</span>
       <span class="err" v-if="imp.error">{{ imp.error }}</span>
     </template>
     <template #foot>
@@ -488,7 +542,7 @@
         </div>
       </div>
       <hr class="divider">
-      <div class="set-row"><span>显示网站图标<br><span class="hint">直接向目标网站请求 favicon，不经过第三方</span></span>
+      <div class="set-row"><span>显示网站图标<br><span class="hint">由本站服务器获取并缓存，不经过第三方服务</span></span>
         <label class="switch"><input type="checkbox" v-model="prefs.icons"><i></i></label></div>
       <div class="set-row"><span>在新标签页打开网址</span>
         <label class="switch"><input type="checkbox" v-model="prefs.newTab"><i></i></label></div>
@@ -531,22 +585,34 @@
     </template>
 
     <template v-if="set.tab === 'safe'">
+      <label class="field"><span>管理密码（就是进入管理员模式时输入的那个）：下面两项都要先验证它才能保存</span>
+        <pw-input v-model="set.currentPassword" autocomplete="current-password"></pw-input></label>
+      <span class="err" v-if="set.error">{{ set.error }}</span>
+
+      <hr class="divider">
       <label class="field"><span>免密码 IP 白名单（每行一个 IP 或网段，如 192.168.1.0/24）</span>
         <textarea class="input" rows="4" v-model="set.whitelist" placeholder="留空表示所有设备都需要密码" spellcheck="false"></textarea>
       </label>
       <div class="row wrap hint">
         <span>你当前的 IP 是 {{ st.ip }}<template v-if="st.viaIp">（已在白名单内）</template></span>
-        <button v-if="!st.viaIp" class="btn ghost" @click="addMyIp">加入白名单</button>
+        <button v-if="!st.viaIp" class="btn ghost" @click="addMyIp">填入上面的列表</button>
       </div>
-      <span class="hint">如果这里显示的不是你的真实 IP（例如总是 127.0.0.1），说明前面有反向代理，需要先配置 TRUST_PROXY，否则不要启用白名单。</span>
+      <span class="hint">如果这里显示的不是你的真实 IP（例如总是 127.0.0.1），说明前面有反向代理，需要先在「服务器」页设置反向代理，否则不要启用白名单。</span>
+      <div class="row">
+        <span class="hint grow">{{ set.currentPassword ? '改完列表后点右边保存才会生效。' : '先在最上面输入管理密码。' }}</span>
+        <button class="btn primary" :disabled="!set.currentPassword" @click="saveWhitelist">保存白名单</button>
+      </div>
+
       <hr class="divider">
-      <label class="field"><span>新密码（不修改请留空）</span>
-        <input class="input" type="password" v-model="set.newPassword" autocomplete="new-password" placeholder="至少 6 位"></label>
-      <hr class="divider">
-      <label class="field"><span>管理密码（就是进入私密模式时输入的那个；保存以上修改需要验证）</span>
-        <input class="input" type="password" v-model="set.currentPassword" autocomplete="current-password"></label>
-      <span class="err" v-if="set.error">{{ set.error }}</span>
-      <div class="row"><span class="spacer"></span><button class="btn primary" :disabled="!set.currentPassword" @click="saveSafe">保存</button></div>
+      <label class="field"><span>修改管理密码</span>
+        <pw-input v-model="set.newPassword" autocomplete="new-password" placeholder="新密码，至少 6 位"></pw-input></label>
+      <label class="field">
+        <pw-input v-model="set.newPassword2" autocomplete="new-password" placeholder="再输入一次新密码"></pw-input></label>
+      <div class="row">
+        <span class="err grow" v-if="set.newPassword2 && set.newPassword !== set.newPassword2">两次输入的新密码不一致</span>
+        <span class="hint grow" v-else>修改后，其他已登录的设备需要用新密码重新进入。</span>
+        <button class="btn" :disabled="!set.currentPassword || !set.newPassword || set.newPassword !== set.newPassword2" @click="changePassword">修改密码</button>
+      </div>
     </template>
 
     <template v-if="set.tab === 'server'">
@@ -565,13 +631,22 @@
         <datalist id="proxies"><option value="1">前面有 1 层反向代理</option><option value="2">前面有 2 层（如 CDN + Nginx）</option><option value="loopback">代理和本服务在同一台机器上</option></datalist>
         <span class="hint" v-if="st.settings.server.locked.trustProxy">已由环境变量 TRUST_PROXY 指定</span>
         <span class="hint" v-else>服务端现在识别到你的 IP 是 {{ st.ip }}。设置正确时，这里应该是你自己的 IP，而不是 127.0.0.1 或代理服务器的地址。</span></label>
+      <label class="field"><span>出站代理（可选）：服务器获取网站图标和标题时，直接连不上的网站会改走这个代理</span>
+        <input class="input" v-model.trim="set.srvOutProxy" placeholder="留空 = 不使用代理，例如 http://127.0.0.1:7890"></label>
+      <div class="set-row"><span>第三方图标服务<br><span class="hint">有些网站会拦截程序访问，服务器取不到图标。开启后最后会向 Google 的图标服务查询，只把网站域名发给它；内网地址永远不会发</span></span>
+        <div class="seg">
+          <button :class="{on: set.srvIconService === 'off'}" @click="set.srvIconService = 'off'">不使用</button>
+          <button :class="{on: set.srvIconService === 'public'}" @click="set.srvIconService = 'public'">仅公开网址</button>
+          <button :class="{on: set.srvIconService === 'all'}" @click="set.srvIconService = 'all'">全部</button>
+        </div>
+      </div>
       <label class="field"><span>对外地址（可选）：别人和智能体访问本站用的地址，用于生成「给智能体的说明」和「一键收藏」按钮</span>
         <input class="input" v-model.trim="set.srvPublicUrl" placeholder="留空则使用当前浏览器地址栏里的地址，例如 https://nav.example.com"></label>
       <label class="field"><span>登录有效期（天）：输入密码后多久需要重新输入</span>
         <input class="input" type="number" min="1" max="365" v-model="set.srvDays" style="width: 120px"></label>
       <hr class="divider">
-      <label class="field"><span>管理密码（就是进入私密模式时输入的那个；保存以上修改需要验证）</span>
-        <input class="input" type="password" v-model="set.currentPassword" autocomplete="current-password"></label>
+      <label class="field"><span>管理密码（就是进入管理员模式时输入的那个；保存以上修改需要验证）</span>
+        <pw-input v-model="set.currentPassword" autocomplete="current-password"></pw-input></label>
       <span class="err" v-if="set.error">{{ set.error }}</span>
       <div class="row"><span class="hint grow">改端口或监听地址后，如果用了 Docker 端口映射、反向代理或防火墙，记得同步修改。</span>
         <button class="btn primary" :disabled="!set.currentPassword" @click="saveServer">保存</button></div>
@@ -594,8 +669,8 @@
       <label class="field"><span>新网址通知地址（可选）：添加网址时向这里 POST 网址的编号、标题和地址，方便智能体立刻处理</span>
         <input class="input" v-model.trim="set.agentWebhook" placeholder="https://"></label>
       <hr class="divider">
-      <label class="field"><span>管理密码（就是进入私密模式时输入的那个；以下操作都需要验证）</span>
-        <input class="input" type="password" v-model="set.currentPassword" autocomplete="current-password"></label>
+      <label class="field"><span>管理密码（就是进入管理员模式时输入的那个；以下操作都需要验证）</span>
+        <pw-input v-model="set.currentPassword" autocomplete="current-password"></pw-input></label>
       <span class="err" v-if="set.error">{{ set.error }}</span>
       <div class="row wrap">
         <button v-if="st.settings.agent?.enabled" class="btn ghost danger" :disabled="!set.currentPassword" @click="agentSave('revoke')">停用</button>
@@ -664,12 +739,12 @@
       <ol>
         <li><b>用智能体能访问到的地址打开本页。</b>智能体和导航在同一台电脑上，用 <code>localhost</code> 就行；不在同一台，就要用局域网 IP 或域名打开，否则下面复制出来的地址它连不上。</li>
         <li><b>决定要不要让它看私密网址。</b>「允许访问私密网址」默认关闭，这时它只能看到公开网址。打开后，私密网址的地址和标题也会交给它（账号密码仍然不会）。拿不准就先关着。</li>
-        <li><b>填管理密码（进入私密模式用的那个），点「生成令牌并启用」。</b>页面上会出现一串以 <code>nav_</code> 开头的令牌。<b>它只显示这一次</b>，关掉设置就看不到了。
+        <li><b>填管理密码（进入管理员模式时输入的那个），点「生成令牌并启用」。</b>页面上会出现一串以 <code>nav_</code> 开头的令牌。<b>它只显示这一次</b>，关掉设置就看不到了。
           <figure><img src="/guide/agent-settings.png" alt="设置里的智能体页" loading="lazy"><figcaption>设置 → 智能体。先看好上面的开关，再在密码框里填管理密码，点右下角的蓝色按钮。</figcaption></figure></li>
         <li><b>点「复制说明」。</b>这时说明里已经自动带上了刚生成的令牌和本站地址。
           <figure><img src="/guide/agent-token.png" alt="生成令牌之后" loading="lazy"><figcaption>生成后令牌出现在中间，下面的红字提醒它只显示一次。「复制说明」在右下角。</figcaption></figure></li>
         <li><b>把说明粘贴给你的智能体</b>，再加一句「请按这份说明，为我导航里还没有详情的网址补全详情」。</li>
-        <li><b>等它跑完，回来检查。</b>右键任意网址 → 查看详情。页面底部的「记录」里会写明这份详情是「由智能体编辑」还是「由你编辑」。不满意的地方直接点「编辑详情」改。
+        <li><b>等它跑完，回来检查。</b>右键任意网址 → 查看详情。页面底部的「记录」里会写明这份详情是「由智能体编辑」还是「由你编辑」。不满意的地方直接点各栏目标题旁的编辑按钮修改。
           <figure><img src="/guide/detail-menu.png" alt="右键菜单里的查看详情" loading="lazy"><figcaption>右键任意网址，第一项就是「查看详情」。</figcaption></figure>
           <figure><img src="/guide/detail-record.png" alt="详情页底部的记录" loading="lazy"><figcaption>详情页最下面的「记录」，最后一行写着是谁填的。</figcaption></figure></li>
       </ol>

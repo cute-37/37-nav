@@ -11,9 +11,10 @@ db.exec(`
   PRAGMA journal_mode = WAL;
   CREATE TABLE IF NOT EXISTS categories (
     id INTEGER PRIMARY KEY,
-    name TEXT NOT NULL UNIQUE,
+    name TEXT NOT NULL,
     private INTEGER NOT NULL DEFAULT 0,
-    sort INTEGER NOT NULL DEFAULT 0
+    sort INTEGER NOT NULL DEFAULT 0,
+    parent_id INTEGER REFERENCES categories(id) ON DELETE CASCADE
   );
   CREATE TABLE IF NOT EXISTS links (
     id INTEGER PRIMARY KEY,
@@ -39,6 +40,28 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 `);
 
+// 分类可以嵌套（最多三层）。旧库的分类表没有 parent_id，而且名称是全局唯一的；
+// 现在只要求「同一个上级下面不重名」。SQLite 去不掉列上的 UNIQUE，只能重建这张表。
+if (!db.prepare('PRAGMA table_info(categories)').all().some((col) => col.name === 'parent_id')) {
+  db.exec(`
+    PRAGMA foreign_keys = OFF;
+    BEGIN;
+    CREATE TABLE categories_new (
+      id INTEGER PRIMARY KEY,
+      name TEXT NOT NULL,
+      private INTEGER NOT NULL DEFAULT 0,
+      sort INTEGER NOT NULL DEFAULT 0,
+      parent_id INTEGER REFERENCES categories(id) ON DELETE CASCADE
+    );
+    INSERT INTO categories_new (id, name, private, sort) SELECT id, REPLACE(name, '/', '／'), private, sort FROM categories;
+    DROP TABLE categories;
+    ALTER TABLE categories_new RENAME TO categories;
+    COMMIT;
+    PRAGMA foreign_keys = ON;
+  `);
+}
+db.exec('CREATE UNIQUE INDEX IF NOT EXISTS categories_sibling_name ON categories (COALESCE(parent_id, 0), name)');
+
 // 旧版每个网址只有一个 category_id，迁移到 link_cats 后清空旧列，保证只迁一次
 if (db.prepare('PRAGMA table_info(links)').all().some((col) => col.name === 'category_id')) {
   db.exec(`
@@ -52,6 +75,29 @@ if (db.prepare('PRAGMA table_info(links)').all().some((col) => col.name === 'cat
 if (!db.prepare('PRAGMA table_info(links)').all().some((col) => col.name === 'detail')) {
   db.exec('ALTER TABLE links ADD COLUMN detail TEXT');
 }
+
+// 网站图标：links.icon 是用户手动上传的；icons 表缓存服务器自动抓到的（按网站来源存一份）
+if (!db.prepare('PRAGMA table_info(links)').all().some((col) => col.name === 'icon')) {
+  db.exec('ALTER TABLE links ADD COLUMN icon TEXT');
+}
+// 分类也可以标 NSFW，下面各级子分类和其中的网址都算 NSFW
+if (!db.prepare('PRAGMA table_info(categories)').all().some((col) => col.name === 'nsfw')) {
+  db.exec('ALTER TABLE categories ADD COLUMN nsfw INTEGER NOT NULL DEFAULT 0');
+}
+// NSFW 标记：工作模式下这些网址一律不显示（不管是不是管理员）
+if (!db.prepare('PRAGMA table_info(links)').all().some((col) => col.name === 'nsfw')) {
+  db.exec('ALTER TABLE links ADD COLUMN nsfw INTEGER NOT NULL DEFAULT 0');
+}
+db.exec(`
+  CREATE TABLE IF NOT EXISTS icon_choices (origin TEXT PRIMARY KEY, data TEXT NOT NULL, fetched_at INTEGER NOT NULL);
+  CREATE TABLE IF NOT EXISTS icons (
+    origin TEXT PRIMARY KEY,
+    type TEXT,
+    data BLOB,
+    ok INTEGER NOT NULL,
+    fetched_at INTEGER NOT NULL
+  );
+`);
 
 export function tx(fn) {
   db.exec('BEGIN');

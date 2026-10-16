@@ -1,8 +1,8 @@
 {
   "name": "37-nav",
-  "version": "1.0.0",
+  "version": "1.2.0",
   "private": true,
-  "description": "自托管网址导航：公开/私密模式、账号信息保管、IP 白名单、书签导入",
+  "description": "自托管网址导航：公开/管理员模式、NSFW 工作模式、账号信息保管、多级分类、书签导入",
   "license": "MIT",
   "homepage": "https://github.com/cute-37/37-nav",
   "repository": {
@@ -33,6 +33,7 @@
     "lucide-static": "^1.52.0",
     "pinyin-pro": "^3.29.4",
     "sortablejs": "^1.15.7",
+    "undici": "^8.11.2",
     "vue": "^3.5.43"
   }
 }

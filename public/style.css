@@ -110,6 +110,8 @@ h1, h2, h3 { font-family: var(--font-title); font-weight: normal; margin: 0; }
 .ic-refresh { mask-image: url(/icons/refresh-cw.svg); }
 .ic-back { mask-image: url(/icons/arrow-left.svg); }
 .ic-info { mask-image: url(/icons/info.svg); }
+.ic-image { mask-image: url(/icons/image.svg); }
+.ic-nsfw { mask-image: url(/icons/eye-off.svg); }
 .ic-none { visibility: hidden; }
 
 /* ---------- 控件 ---------- */
@@ -150,18 +152,22 @@ h1, h2, h3 { font-family: var(--font-title); font-weight: normal; margin: 0; }
   outline: none;
   transition: border-color 0.12s, box-shadow 0.12s;
 }
+select.input { appearance: auto; cursor: pointer; }
 textarea.input { height: auto; padding: calc(var(--gap) * 0.6) var(--gap); resize: vertical; line-height: 1.5; }
 .input:focus { border-color: var(--ac); box-shadow: 0 0 0 3px color-mix(in srgb, var(--ac) 14%, transparent); }
 .input::placeholder { color: var(--t4); }
 .input:disabled { opacity: 0.55; cursor: not-allowed; }
 
 .seg {
+  /* 旁边的说明文字再长也不能把分段按钮挤窄，否则按钮里的字会竖着排 */
+  flex: none;
   display: inline-flex;
   padding: 2px;
   border-radius: calc(var(--r) + 1px);
   background: var(--hover);
 }
 .seg button {
+  white-space: nowrap;
   height: calc(var(--ctl) - 4px);
   padding: 0 calc(var(--gap) * 1.3);
   border: 0;
@@ -307,6 +313,10 @@ img.logo { display: block; background: none !important; object-fit: contain; }
 .nav-item:hover .act, .nav-item .act:focus-visible { opacity: 1; }
 .nav-item.on .act { background: var(--surface); }
 
+.nav .twist { display: none; border-radius: 4px; }
+.nav.nested .twist { display: inline-block; margin-right: -4px; }
+.nav.nested .twist:not(.leaf):hover { color: var(--t1); background: var(--active); }
+.avatar.small { width: 17px; height: 17px; font-size: 10px; }
 .side-label {
   display: flex;
   align-items: center;
@@ -424,6 +434,22 @@ img.logo { display: block; background: none !important; object-fit: contain; }
 .content { flex: 1; overflow-y: auto; display: flex; flex-direction: column; padding: calc(var(--gap) * 1.5) calc(var(--gap) * 3) calc(var(--gap) * 5); }
 .group { flex: none; }
 .foot-hint { margin: auto 0 0; padding-top: calc(var(--gap) * 4); color: var(--t3); font-size: 0.92em; text-align: center; }
+.group.depth-1 { margin-left: calc(var(--gap) * 2.5); }
+.group.depth-2 { margin-left: calc(var(--gap) * 5); }
+.group.depth-1 + .group, .group + .group.depth-1, .group + .group.depth-2 { margin-top: calc(var(--gap) * 1.5); }
+.group.depth-1 .group-head h3 { font-size: 13.5px; }
+.group.depth-2 .group-head h3 { font-size: 13px; color: var(--t2); }
+/* 一个小节上方的间距只看「它前面那个」是否收起，不看它自己：
+   这样点标题展开或收起时，被点的标题留在原地不动，只有它下面的内容移动 */
+.group.folded + .group { margin-top: calc(var(--gap) * 0.5); }
+.group-head.foldable { cursor: pointer; user-select: none; border-radius: var(--r); margin-left: -4px; padding: 2px 4px; }
+.group-head.foldable:hover { background: var(--hover); }
+.group.folded .group-head { margin-bottom: 0; }
+/* 展开 / 收起用的小箭头：展开时朝下 */
+.twist { font-size: 12px; color: var(--t3); transition: rotate 0.15s; flex: none; }
+.twist.open { rotate: 90deg; }
+.twist.leaf { visibility: hidden; }
+.group-head .twist { align-self: center; font-size: 12px; color: var(--t3); }
 .group + .group { margin-top: calc(var(--gap) * 2.5); }
 .group-head { display: flex; align-items: baseline; gap: var(--gap); margin-bottom: var(--gap); }
 .group-head h3 { font-size: 14.5px; }
@@ -666,7 +692,7 @@ img.logo { display: block; background: none !important; object-fit: contain; }
 }
 .box-body { display: flex; flex-direction: column; gap: var(--gap); padding: 0 calc(var(--gap) * 1.25) calc(var(--gap) * 1.25); }
 .kv { display: grid; grid-template-columns: 30% 1fr auto; gap: calc(var(--gap) * 0.75); }
-.pw { position: relative; }
+.pw { position: relative; display: block; }
 .pw .input { padding-right: var(--ctl); }
 .pw .ib { position: absolute; right: 0; top: 0; }
 
@@ -826,3 +852,120 @@ input[type='checkbox'] { accent-color: var(--ac); margin: 0; }
 
 /* 深色的站点图标在暗色下会看不见，垫一层浅底 */
 :root[data-theme='dark'] .favicon.ok img { background: #e9e4db; padding: 2px; }
+
+/* ---------- 详情页的编辑 ---------- */
+.sec-head { display: flex; align-items: center; gap: var(--gap); margin-bottom: var(--gap); min-height: calc(var(--ctl) - 4px); }
+.page .sec-head h3 { margin: 0; }
+.sec-head small { font-size: 0.85em; }
+/* 编辑按钮紧跟标题，只有图标；平时淡一点，悬停到这一栏时加深 */
+.sec-edit { width: calc(var(--ctl) - 6px); height: calc(var(--ctl) - 6px); color: var(--t4); }
+.sec:hover .sec-edit, .sec-edit:focus-visible { color: var(--t2); }
+.sec-edit:disabled { visibility: hidden; }
+.sec-edit .ic { font-size: 0.95em; }
+.sec-edit.always { margin-left: auto; width: auto; padding: 0 var(--gap); color: var(--t3); }
+.sec.editing .input { background: var(--surface); }
+.sec-actions { display: flex; align-items: center; justify-content: flex-start; gap: var(--gap); margin-top: var(--gap); }
+
+.link-editor:focus { outline: none; }
+.link-editor { display: flex; flex-direction: column; gap: calc(var(--gap) * 0.75); }
+.link-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) var(--ctl); gap: calc(var(--gap) * 0.75); align-items: center; }
+.link-row.head { color: var(--t3); font-size: 0.9em; margin-bottom: -2px; }
+.link-row.head span { padding-left: 2px; }
+
+.account + .account { margin-top: var(--gap); }
+/* 第一行固定成四列：钥匙 | 账号（占一半） | 密码（占一半） | 编辑，多个账号上下对齐 */
+.acct-main { display: grid; grid-template-columns: auto minmax(0, 35fr) minmax(0, 65fr) auto; align-items: center; gap: calc(var(--gap) * 1.5); padding: calc(var(--gap) * 0.9) calc(var(--gap) * 1.5); }
+.acct-main > .ic-key { color: var(--t3); }
+.acct-field { display: flex; align-items: center; gap: 2px; min-width: 0; }
+.acct-field label { flex: none; color: var(--t3); font-size: 0.92em; margin-right: var(--gap); }
+.acct-name { flex: 0 1 auto; font-family: var(--font-title); color: var(--t1); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; margin-right: 2px; }
+.acct-pw { flex: 0 1 12em; color: var(--t2); letter-spacing: 0.05em; margin-right: 2px; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acct-field.empty .acct-pw { color: var(--t4); letter-spacing: 0; }
+@media (max-width: 540px) {
+  .acct-main { grid-template-columns: auto minmax(0, 1fr) auto; }
+  .acct-main > .acct-field:nth-of-type(2) { grid-column: 2; grid-row: 2; }
+}
+.acct-main .ib, .acct-line .ib { width: calc(var(--ctl) - 6px); height: calc(var(--ctl) - 6px); color: var(--t3); }
+.acct-main .ib:hover, .acct-line .ib:hover { color: var(--t1); }
+.acct-more { border-top: 1px solid var(--line); padding: calc(var(--gap) * 0.5) calc(var(--gap) * 1.5) calc(var(--gap) * 0.6); font-size: 0.92em; }
+.acct-line { display: flex; align-items: center; gap: var(--gap); min-height: calc(var(--ctl) - 2px); }
+.acct-line label { width: 64px; flex: none; color: var(--t3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acct-line .val { flex: 1; min-width: 0; color: var(--t2); overflow-wrap: anywhere; white-space: pre-wrap; }
+
+.favicon.small { width: 24px; height: 24px; }
+.favicon.small .avatar { font-size: 11px; border-radius: 7px; }
+
+@media (max-width: 540px) {
+  .link-row { grid-template-columns: minmax(0, 1fr) var(--ctl); }
+  .link-row input:first-child { grid-column: 1 / -1; }
+  .link-row.head { display: none; }
+}
+
+/* 密码显示区宽度固定（12 个字宽），显示明文或圆点时后面的小眼睛和复制按钮都不移动；更长的显示省略号，悬停看全文 */
+.acct-field .acct-pw { width: 12em; }
+/* 复制、小眼睛平时缩成一个小圆点，鼠标移上去才显示图标 */
+.ib.dot { position: relative; }
+.ib.dot .ic { opacity: 0; transition: opacity 0.12s; }
+.ib.dot::before { content: ''; position: absolute; left: 50%; top: 50%; width: 4px; height: 4px; margin: -2px 0 0 -2px; border-radius: 50%; background: var(--t4); transition: opacity 0.12s; }
+.ib.dot:hover .ic, .ib.dot:focus-visible .ic { opacity: 1; }
+.ib.dot:hover::before, .ib.dot:focus-visible::before { opacity: 0; }
+@media (hover: none) { .ib.dot .ic { opacity: 1; } .ib.dot::before { display: none; } }
+
+/* 编辑网址时的图标选择：一排左对齐的小卡片，当前用的那张描强调色 */
+.icon-field > span { display: flex; align-items: baseline; gap: var(--gap); }
+.link-btn { margin-left: auto; border: 0; padding: 0; background: none; color: var(--ac-text); font-size: 0.92em; cursor: pointer; }
+.link-btn:hover { text-decoration: underline; }
+.link-btn:disabled { color: var(--t3); cursor: default; text-decoration: none; }
+.icon-picks { display: flex; flex-wrap: wrap; align-items: center; gap: calc(var(--gap) * 0.75); }
+.icon-pick { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; width: 64px; height: 64px; padding: 0; border: 1px solid var(--line); border-radius: var(--r); background: var(--surface); color: var(--t3); cursor: pointer; transition: border-color 0.12s, background 0.12s; }
+.icon-pick:hover { border-color: var(--t4); background: var(--hover); }
+.icon-pick.on { border-color: var(--ac); box-shadow: 0 0 0 1px var(--ac); background: var(--ac-soft); }
+.icon-pick img { width: 30px; height: 30px; object-fit: contain; }
+.icon-pick .favicon.small { width: 30px; height: 30px; }
+.icon-pick small { font-size: 10.5px; white-space: nowrap; }
+.icon-pick.add { border-style: dashed; }
+.icon-pick.add .ic { font-size: 18px; }
+
+/* 工作 / 完全模式开关：前面一个小圆点，绿色是工作模式，红色是完全模式 */
+.workmode { padding: 0 calc(var(--gap) * 1.2); }
+.workmode .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.workmode .dot.work { background: #3fae6a; box-shadow: 0 0 0 3px color-mix(in srgb, #3fae6a 18%, transparent); }
+.workmode .dot.full { background: #d9534f; box-shadow: 0 0 0 3px color-mix(in srgb, #d9534f 18%, transparent); }
+.mark.nsfw { background: color-mix(in srgb, #d9534f 14%, var(--surface)); color: #c0433f; }
+
+/* NSFW 网址：卡片左上角一个红色的小三角，跟着卡片圆角走 */
+.card.nsfw::before {
+  content: '';
+  position: absolute;
+  left: -1px;
+  top: -1px;
+  width: 14px;
+  height: 14px;
+  border-top-left-radius: calc(var(--r) + 3px);
+  background: linear-gradient(135deg, #d9534f 50%, transparent 50%);
+  pointer-events: none;
+}
+.grid.list .card.nsfw::before { border-top-left-radius: 0; width: 10px; height: 10px; }
+
+/* 模糊模式用琥珀色：介于绿（安全）和红（全开）之间，像红绿灯的黄灯 */
+.workmode .dot.blur { background: #e0a23b; box-shadow: 0 0 0 3px color-mix(in srgb, #e0a23b 22%, transparent); }
+/* 模糊模式：NSFW 网址的图标和文字打码，鼠标移上去才看清 */
+.blurred .favicon, .blurred .txt, .blurred .extra, .hero.blurred .favicon, .hero.blurred > .grow { filter: blur(6px); transition: filter 0.15s; }
+.card.blurred:hover .favicon, .card.blurred:hover .txt, .card.blurred:hover .extra,
+.hero.blurred:hover .favicon, .hero.blurred:hover > .grow { filter: none; }
+.nsfw-dot { display: inline-block; width: 6px; height: 6px; margin-left: 4px; border-radius: 50%; background: #d9534f; vertical-align: middle; }
+
+/* 模糊模式下卡片已经打码，不再需要红色倒角 */
+.card.blurred::before { display: none; }
+/* 侧栏分类：NSFW 小红点贴在分类头像的右下角 */
+.nav-item .avatar { position: relative; }
+.nav-item .avatar .nsfw-dot { position: absolute; right: -2px; bottom: -2px; width: 7px; height: 7px; margin: 0; border: 1.5px solid var(--bg-side); box-sizing: content-box; }
+.nav-item.on .avatar .nsfw-dot { border-color: var(--surface); }
+/* 模糊模式：NSFW 分类在侧栏和分组标题里也打码，悬停看清 */
+.nav-item.blurred .avatar, .nav-item.blurred .name,
+.group.blurred > .group-head h3 { filter: blur(5px); transition: filter 0.15s; }
+.nav-item.blurred:hover .avatar, .nav-item.blurred:hover .name,
+.group.blurred > .group-head:hover h3 { filter: none; }
+
+/* 模糊模式下分类已经打码，不再显示 NSFW 小红点 */
+.nav-item.blurred .nsfw-dot { display: none; }

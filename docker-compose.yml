@@ -4,7 +4,7 @@ name: nav
 services:
   nav:
     build: .
-    image: 37-nav:1.0.0
+    image: 37-nav:1.2.0
     container_name: nav
     restart: unless-stopped
     ports:

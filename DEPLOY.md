@@ -22,8 +22,8 @@ docker compose up -d
 这会在本机构建镜像。服务器不方便联网构建的话，可以到 [Releases](https://github.com/cute-37/37-nav/releases) 下载打包好的镜像文件（`amd64` 是普通的 x86 服务器，`arm64` 是 ARM 服务器和树莓派），然后：
 
 ```bash
-docker load -i 37-nav-1.0.0-docker-amd64.tar.gz
-docker run -d --name nav --restart unless-stopped -p 3080:3080 -v nav-data:/data 37-nav:1.0.0
+docker load -i 37-nav-1.2.0-docker-amd64.tar.gz
+docker run -d --name nav --restart unless-stopped -p 3080:3080 -v nav-data:/data 37-nav:1.2.0
 ```
 
 - **换端口**：改 `docker-compose.yml` 里 `ports` 左边的数字，例如 `"8080:3080"`，然后重新执行上面的命令。容器内的端口固定为 3080，所以网页 设置 → 服务器 里的端口是锁定的。
